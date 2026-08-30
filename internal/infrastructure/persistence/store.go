@@ -23,16 +23,16 @@ const retryInitialDelay = time.Second
 
 type Store struct {
 	db               *sql.DB
+	engine           Engine
 	renderer         ormdialect.Renderer
 	workspaceContext func(context.Context, string, string) context.Context
 }
 
-func NewStore(db *sql.DB, driver, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
-	renderer, err := ormdialect.ParseRenderer(driver, schema, "")
-	if err != nil {
-		return nil, fmt.Errorf("Data Exchange SQL renderer: %w", err)
+func NewStore(db *sql.DB, engine Engine, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
+	if engine == nil {
+		return nil, fmt.Errorf("Data Exchange database engine is required")
 	}
-	return &Store{db: db, renderer: renderer, workspaceContext: workspaceContext}, nil
+	return &Store{db: db, engine: engine, renderer: engine.Dialect().WithSchema(schema), workspaceContext: workspaceContext}, nil
 }
 func (s *Store) Scoped(ctx context.Context, workspace, actor string) context.Context {
 	if s.workspaceContext != nil {
@@ -73,16 +73,11 @@ func (s *Store) registerScope(ctx context.Context, executor sqlExecer, workspace
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	insert := ormbuilder.NewInsertBuilder(s.renderer, "data_exchange_queue_scopes").
 		Columns("scope_key", "updated_at").Values(workspace, now)
-	if s.renderer.Name() == ormdialect.MySQL {
-		insert.OnDuplicateKeyUpdate(ormbuilder.Assign("updated_at", now))
-	} else {
-		insert.OnConflictDoUpdate([]string{"scope_key"}, ormbuilder.Assign("updated_at", now))
-	}
-	query, args, err := insert.Build()
+	insert, err := s.engine.ApplyUpsert(insert, []string{"scope_key"}, ormbuilder.Assign("updated_at", now))
 	if err != nil {
 		return err
 	}
-	_, err = executor.ExecContext(ctx, query, args...)
+	_, err = execute(ctx, executor, insert)
 	return err
 }
 

@@ -27,14 +27,18 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if host == nil || host.Database() == nil || host.Migrations() == nil {
 		return nil, fmt.Errorf("Data Exchange Module host is incomplete")
 	}
-	migrations, err := persistence.SchemaMigrations(host.Migrations().Driver(), host.Migrations().Schema())
+	engine, err := persistence.NewEngine(host.Migrations().Driver())
+	if err != nil {
+		return nil, err
+	}
+	migrations, err := persistence.SchemaMigrations(engine, host.Migrations().Schema())
 	if err != nil {
 		return nil, err
 	}
 	if err := host.Migrations().ApplyOwnedMigrations(ctx, "data_exchange", migrations); err != nil {
 		return nil, fmt.Errorf("apply Data Exchange Module migrations: %w", err)
 	}
-	store, err := persistence.NewStore(host.Database(), host.Migrations().Driver(), host.Migrations().Schema(), host.WorkspaceContext)
+	store, err := persistence.NewStore(host.Database(), engine, host.Migrations().Schema(), host.WorkspaceContext)
 	if err != nil {
 		return nil, err
 	}

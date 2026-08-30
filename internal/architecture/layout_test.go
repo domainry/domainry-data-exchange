@@ -60,3 +60,30 @@ func TestCSVCodecHasOneOwnerInSDK(t *testing.T) {
 		t.Fatal("implementation repository must not retain a parallel file engine")
 	}
 }
+
+func TestPersistenceDoesNotBranchOnConcreteDatabaseTypes(t *testing.T) {
+	forbidden := []string{"sqlite", "sqlite3", "mysql", "postgres", "postgresql", "pgx", ".Name() =="}
+	err := filepath.WalkDir("../../internal", func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		normalized := filepath.ToSlash(path)
+		if filepath.Base(path) == "engine.go" || strings.Contains(normalized, "/persistence/sqlite/") || strings.Contains(normalized, "/persistence/mysql/") || strings.Contains(normalized, "/persistence/postgres/") {
+			return nil
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		text := strings.ToLower(string(content))
+		for _, value := range forbidden {
+			if strings.Contains(text, strings.ToLower(value)) {
+				t.Errorf("Data Exchange implementation binds concrete database %q in %s", value, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

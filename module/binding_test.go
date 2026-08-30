@@ -118,14 +118,18 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
-	migrations, err := persistence.SchemaMigrations("sqlite", "")
+	engine, err := persistence.NewEngine("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := persistence.SchemaMigrations(engine, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
-	store, err := persistence.NewStore(db, "sqlite", "", h.WorkspaceContext)
+	store, err := persistence.NewStore(db, engine, "", h.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}
