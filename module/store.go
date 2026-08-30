@@ -206,7 +206,7 @@ func (s *sqlStore) submitExport(ctx context.Context, r dataexchange.ExportReques
 	if err = tx.Commit(); err != nil {
 		return dataexchange.Job{}, false, err
 	}
-	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "export", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, CreatedAt: now, UpdatedAt: now}, false, nil
+	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "export", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, Options: append([]byte(nil), payload...), CreatedAt: now, UpdatedAt: now}, false, nil
 }
 
 type scanner interface{ Scan(...any) error }
@@ -214,28 +214,30 @@ type scanner interface{ Scan(...any) error }
 func scanJob(row scanner) (dataexchange.Job, error) {
 	var j dataexchange.Job
 	var created, updated string
-	err := row.Scan(&j.ID, &j.Provider, &j.Operation, &j.Status, &j.Checkpoint, &j.Cursor, &j.Total, &j.ResultChunks, &j.ArtifactID, &j.ErrorCode, &created, &updated, &j.WorkspaceID, &j.ObjectKey, &j.ActorID, &j.RoleKey)
+	var options []byte
+	err := row.Scan(&j.ID, &j.Provider, &j.Operation, &j.Status, &j.Checkpoint, &j.Cursor, &j.Total, &j.ResultChunks, &j.ArtifactID, &j.ErrorCode, &created, &updated, &j.WorkspaceID, &j.ObjectKey, &j.ActorID, &j.RoleKey, &options)
 	if err != nil {
 		return j, err
 	}
+	j.Options = append([]byte(nil), options...)
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return j, nil
 }
 func (s *sqlStore) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, provider, operation, objectKey, key string) (dataexchange.Job, bool) {
-	q := `SELECT id,provider,operation,status,checkpoint_value,checkpoint_cursor,total_value,result_chunks,artifact_id,error_code,created_at,updated_at,workspace_id,object_key,actor_id,role_key FROM ` + s.table("data_exchange_jobs") + ` WHERE workspace_id=` + s.placeholder(1) + ` AND provider=` + s.placeholder(2) + ` AND operation=` + s.placeholder(3) + ` AND object_key=` + s.placeholder(4) + ` AND idempotency_key=` + s.placeholder(5)
+	q := `SELECT id,provider,operation,status,checkpoint_value,checkpoint_cursor,total_value,result_chunks,artifact_id,error_code,created_at,updated_at,workspace_id,object_key,actor_id,role_key,request_payload FROM ` + s.table("data_exchange_jobs") + ` WHERE workspace_id=` + s.placeholder(1) + ` AND provider=` + s.placeholder(2) + ` AND operation=` + s.placeholder(3) + ` AND object_key=` + s.placeholder(4) + ` AND idempotency_key=` + s.placeholder(5)
 	j, e := scanJob(s.db.QueryRowContext(ctx, q, scope.WorkspaceID, provider, operation, objectKey, key))
 	return j, e == nil
 }
 func (s *sqlStore) job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	q := `SELECT id,provider,operation,status,checkpoint_value,checkpoint_cursor,total_value,result_chunks,artifact_id,error_code,created_at,updated_at,workspace_id,object_key,actor_id,role_key FROM ` + s.table("data_exchange_jobs") + ` WHERE id=` + s.placeholder(1) + ` AND workspace_id=` + s.placeholder(2)
-	return scanJob(s.db.QueryRowContext(ctx, q, r.JobID, r.Scope.WorkspaceID))
+	q := `SELECT id,provider,operation,status,checkpoint_value,checkpoint_cursor,total_value,result_chunks,artifact_id,error_code,created_at,updated_at,workspace_id,object_key,actor_id,role_key,request_payload FROM ` + s.table("data_exchange_jobs") + ` WHERE id=` + s.placeholder(1) + ` AND workspace_id=` + s.placeholder(2) + ` AND actor_id=` + s.placeholder(3)
+	return scanJob(s.db.QueryRowContext(ctx, q, r.JobID, r.Scope.WorkspaceID, r.Scope.ActorID))
 }
 func (s *sqlStore) cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	q := `UPDATE ` + s.table("data_exchange_jobs") + ` SET status='cancelled',updated_at=` + s.placeholder(1) + ` WHERE id=` + s.placeholder(2) + ` AND workspace_id=` + s.placeholder(3) + ` AND status IN ('queued','running')`
-	if _, e := s.db.ExecContext(ctx, q, time.Now().UTC().Format(time.RFC3339Nano), r.JobID, r.Scope.WorkspaceID); e != nil {
+	q := `UPDATE ` + s.table("data_exchange_jobs") + ` SET status='cancelled',updated_at=` + s.placeholder(1) + ` WHERE id=` + s.placeholder(2) + ` AND workspace_id=` + s.placeholder(3) + ` AND actor_id=` + s.placeholder(4) + ` AND status IN ('queued','running')`
+	if _, e := s.db.ExecContext(ctx, q, time.Now().UTC().Format(time.RFC3339Nano), r.JobID, r.Scope.WorkspaceID, r.Scope.ActorID); e != nil {
 		return dataexchange.Job{}, e
 	}
 	return s.job(ctx, r)
@@ -439,10 +441,12 @@ func (s *sqlStore) heartbeat(ctx context.Context, x workItem, ttl time.Duration)
 func (s *sqlStore) artifact(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
 	ctx = s.scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	var a dataexchange.Artifact
-	q := `SELECT a.id,a.filename,a.content_type,a.content_sha256,a.size_bytes FROM ` + s.table("data_exchange_artifacts") + ` a JOIN ` + s.table("data_exchange_jobs") + ` j ON j.id=a.job_id WHERE j.id=` + s.placeholder(1) + ` AND j.workspace_id=` + s.placeholder(2) + ` AND j.status='completed'`
-	if e := s.db.QueryRowContext(ctx, q, r.JobID, r.Scope.WorkspaceID).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size); e != nil {
+	var expiresAt string
+	q := `SELECT a.id,a.filename,a.content_type,a.content_sha256,a.size_bytes,a.expires_at FROM ` + s.table("data_exchange_artifacts") + ` a JOIN ` + s.table("data_exchange_jobs") + ` j ON j.id=a.job_id WHERE j.id=` + s.placeholder(1) + ` AND j.workspace_id=` + s.placeholder(2) + ` AND j.actor_id=` + s.placeholder(3) + ` AND j.status='completed'`
+	if e := s.db.QueryRowContext(ctx, q, r.JobID, r.Scope.WorkspaceID, r.Scope.ActorID).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size, &expiresAt); e != nil {
 		return a, e
 	}
+	a.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiresAt)
 	content, e := s.chunks(ctx, r.Scope.WorkspaceID, r.JobID, "result")
 	if e != nil {
 		return a, e

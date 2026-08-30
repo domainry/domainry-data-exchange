@@ -236,11 +236,31 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 	if !ok {
 		return fmt.Errorf("export provider unavailable")
 	}
+	plan := dataexchange.ExportPlan{
+		Filename:    x.ObjectKey + ".csv",
+		ContentType: "text/csv; charset=utf-8",
+		ExpiresAt:   x.Job.CreatedAt.Add(24 * time.Hour),
+	}
+	if planner, planned := p.(modulehost.ExportPlanningProvider); planned {
+		var e error
+		plan, e = planner.PlanExport(ctx, dataexchange.ExportPlanRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, Options: x.Payload, JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt})
+		if e != nil {
+			return e
+		}
+	}
+	plan.Filename = strings.TrimSpace(plan.Filename)
+	plan.ContentType = strings.TrimSpace(plan.ContentType)
+	if plan.Filename == "" || plan.ContentType == "" || plan.ExpiresAt.IsZero() {
+		return fmt.Errorf("export provider returned an incomplete artifact plan")
+	}
 	cursor := x.Job.Cursor
 	seq, total := x.Job.ResultChunks, x.Job.Checkpoint
 	header := seq > 0
-	for {
-		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.ID})
+	// A terminal page commit stores an empty cursor. If the process crashes
+	// between that commit and completion, resume finalization instead of reading
+	// the export again and duplicating every row.
+	for seq == 0 || cursor != "" {
+		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.ID, ArtifactExpiresAt: plan.ExpiresAt})
 		if e != nil {
 			return e
 		}
@@ -287,7 +307,16 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 	if e != nil {
 		return e
 	}
-	a := &artifactRecord{ID: x.Job.ID + ":artifact", Filename: x.ObjectKey + ".csv", ContentType: "text/csv; charset=utf-8", SHA256: sha, Size: size, ExpiresAt: time.Now().UTC().Add(24 * time.Hour)}
+	a := &artifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
+	if finalizer, finalizes := p.(modulehost.ExportCompletionProvider); finalizes {
+		if e = finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
+			Scope: x.Scope, ObjectKey: x.ObjectKey, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
+			Artifact: dataexchange.Artifact{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, SHA256: a.SHA256, Size: a.Size, ExpiresAt: a.ExpiresAt},
+			Rows:     total, ResultChunks: seq,
+		}); e != nil {
+			return e
+		}
+	}
 	return b.store.complete(ctx, x, a)
 }
 
