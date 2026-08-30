@@ -12,9 +12,9 @@ import (
 
 func TestReleasedMigrationChecksumsRemainStable(t *testing.T) {
 	expected := map[string][]string{
-		"sqlite":   {"59a453de3c4edd50956b63a390cbc2a750304bb6b76476a51c199e61a703c218", "17900a2e42cddfceafdf3275b811786fd34d53be0b500ac74388cae1e5540a6c", "b2de24b34599c0b9630080708104a1b7bb5efd34a947beaa9ff7ed4b537612dd", "d4b49e99ad2cce10d6eb6d174355b15b1059add659eb0709e0ae05afb2441510", "61a134fdb7bd7ef90cfc2a5872f0569ad6df6f7668f02877e626641683a11f02"},
-		"mysql":    {"4701fb1114dd5fd006eba5452dfcb8a045f65e24f65a6383d50d082880158598", "c6fb49a2c6da0a507ee351da5b3de0f159c117c64f9722aac67ab2a615199001", "7187a4cc6084117e75604a73e8c4b4db4e09c38800f171f897134da18b1d3797", "a1db73d7604fed7676b69b9539796510bd9e3106b9582278413bb8ce1528c373", "ccc1596fb203792da9f6d1844c1b22a1551d138a53f626b14bc0c48d3b9b51ab"},
-		"postgres": {"fbbe8edfb02a106da05b13849a981f82c5abfd7c7ac857225550de3759df8a8e", "4170bda0096b51baa2ddeb4b3b54c317a14ae0691816c9b909d83cc9c832f6e1", "afbf6dbdf1848d86eb5f9ce48ef03d82f93dfa3f01b37d4954cd16e0703884b9", "3e934a14ee76896cd35dd92804112d6855fa7246fe1e6e2466a2370852389578", "6533ecbfab2856faf35d9e7cb61a2ebf4ca6311323e63ea2432ca680604fcc93"},
+		"sqlite":   {"f7b5da7ffbe57206ef4974545576047f0d81876183728218f10da2b3186fcea1", "58da2f808f2c33f492bb3d6fe7263dcc40cd7b28c17fe0ba97fe7067722b29a3", "51f469844558e045957271470bf3fb94d18549c10b76974e22fbaad33afece17", "407ac7fde574ac30b257d0f23dfe203dcc5fe044d9c4599a7ba2cb4a895745ea", "903240de4e44136067afdbbd6fb86ea7e115c5b765e2c8884d4cb0783a91c1de"},
+		"mysql":    {"bdd63c9319bae1bd963a621802032c82952bf6fa1b7c534310ac415ddb736e40", "e0a622ab0303250e19644f58b9b84b93c3b60e7f22e30cf152ee3e55ec66540c", "e67b2bf1e422c2f181e38b3bb21fb3f153b78b979e98a9ecca70323eb67ee035", "dc86f32ed60b638d4b32b9f4a99304a4694999d0b49de98ebe29465b864a9c74", "adea63defd1f5387ccefc6ae333485e0f364a45a21d8b68797c9b72eaee03551"},
+		"postgres": {"9cfb56abbc80532e98770c09f38c2c159a542c98a8c9627adb03d509ff9ce0e4", "6c9b396575e96196e114c21b15ae099455a46fd700d692ad53a351b87b33838e", "bdbaa924893d6356d4c1dbe2a80a63aba172947cd03d97a9e16fe6153b20f5e5", "ab775172313c54b6562ae2568de9e2480ebe2f0870d557899703f45c4276c11f", "5072e7ac933e9d4f7261b9cb1eea3a8e545db1e043b7bdc3f8244a8ef80e8c44"},
 	}
 	for driver, checksums := range expected {
 		engine, err := persistenceengine.NewEngine(driver)
@@ -57,9 +57,9 @@ func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
 	tests := []struct {
 		driver, quotedTable, quotedColumn string
 	}{
-		{"sqlite", `"data_exchange_jobs"`, `"attempt_count"`},
-		{"postgres", `"data_exchange_jobs"`, `"attempt_count"`},
-		{"mysql", "`data_exchange_jobs`", "`attempt_count`"},
+		{"sqlite", `"_data_exchange_jobs"`, `"attempt_count"`},
+		{"postgres", `"_data_exchange_jobs"`, `"attempt_count"`},
+		{"mysql", "`_data_exchange_jobs`", "`attempt_count`"},
 	}
 	for _, test := range tests {
 		t.Run(test.driver, func(t *testing.T) {

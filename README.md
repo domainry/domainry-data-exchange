@@ -8,7 +8,7 @@ does not import implementation packages or maintain a second file engine.
 
 ## Deployments
 
-- `module.Factory` runs in-process and owns `data_exchange_jobs`, `data_exchange_chunks`, `data_exchange_artifacts`, and the workspace queue-scope index in the host database.
+- `module.Factory` runs in-process and owns `_data_exchange_jobs`, `_data_exchange_job_chunks`, `_data_exchange_artifacts`, and the workspace queue-scope index in the host database.
 - `remote.Factory` delegates the same SDK Binding to a SaaS transport. The transport must connect the Runtime Provider bridge before accepting work.
 
 Both deployments expose the same `dataexchange.Binding`. Runtime composition selects a Factory; HTTP and Record application code do not branch on deployment mode.

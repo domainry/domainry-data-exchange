@@ -16,10 +16,10 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 	}
 	profile := engine.HistoricalSchema()
 	text, key, large := profile.TextType, profile.KeyType, profile.LargeType
-	jobsTable := profile.Table(schema, "data_exchange_jobs")
-	chunksTable := profile.Table(schema, "data_exchange_chunks")
-	artifactsTable := profile.Table(schema, "data_exchange_artifacts")
-	queueScopesTable := profile.Table(schema, "data_exchange_queue_scopes")
+	jobsTable := profile.Table(schema, "_data_exchange_jobs")
+	chunksTable := profile.Table(schema, "_data_exchange_job_chunks")
+	artifactsTable := profile.Table(schema, "_data_exchange_artifacts")
+	queueScopesTable := profile.Table(schema, "_data_exchange_queue_scopes")
 	jobs := `CREATE TABLE IF NOT EXISTS ` + jobsTable + ` (` +
 		`id ` + key + ` PRIMARY KEY, workspace_id ` + key + ` NOT NULL, provider ` + key + ` NOT NULL, operation ` + key + ` NOT NULL, object_key ` + key + ` NOT NULL, ` +
 		`idempotency_key ` + key + ` NOT NULL, request_sha256 ` + key + ` NOT NULL, request_payload ` + large + ` NOT NULL, status ` + key + ` NOT NULL, checkpoint_value INTEGER NOT NULL DEFAULT 0, checkpoint_cursor ` + key + ` NOT NULL DEFAULT '', total_value INTEGER NOT NULL DEFAULT 0, result_chunks INTEGER NOT NULL DEFAULT 0, ` +
@@ -34,16 +34,16 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 	queueScopes := `CREATE TABLE IF NOT EXISTS ` + queueScopesTable + ` (scope_key ` + key + ` PRIMARY KEY, updated_at ` + key + ` NOT NULL)`
 	ownerReference := `ALTER TABLE ` + jobsTable + ` ADD COLUMN reference_id ` + key + ` NOT NULL DEFAULT ''`
 	renderer := engine.Dialect().WithSchema(schema)
-	attempts, _, err := ormschema.NewAddColumn(renderer, "data_exchange_jobs", ormschema.Column("attempt_count", ormschema.Integer()).NotNull().DefaultValue(0)).Build()
+	attempts, _, err := ormschema.NewAddColumn(renderer, "_data_exchange_jobs", ormschema.Column("attempt_count", ormschema.Integer()).NotNull().DefaultValue(0)).Build()
 	if err != nil {
 		return nil, err
 	}
-	nextAttempt, _, err := ormschema.NewAddColumn(renderer, "data_exchange_jobs", ormschema.Column("next_attempt_at", ormschema.TextKey(191)).NotNull().DefaultValue("")).Build()
+	nextAttempt, _, err := ormschema.NewAddColumn(renderer, "_data_exchange_jobs", ormschema.Column("next_attempt_at", ormschema.TextKey(191)).NotNull().DefaultValue("")).Build()
 	if err != nil {
 		return nil, err
 	}
 	return []modulehost.Migration{
-		{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts},
+		{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_job_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts},
 		{ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}, {ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference},
 		{ID: "data_exchange_job_attempt_count_v3", SQL: attempts}, {ID: "data_exchange_job_next_attempt_v4", SQL: nextAttempt},
 	}, nil

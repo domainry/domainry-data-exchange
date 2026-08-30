@@ -366,7 +366,7 @@ func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, provider.content[:chunkSize], strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(t.Context(), "worker-two", time.Second)
@@ -409,7 +409,7 @@ func TestExpiredLeaseRejectsChangedCanonicalArtifactPrefix(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, append([]byte(nil), provider.content[:chunkSize]...), strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	provider.content = append([]byte(nil), provider.content...)
@@ -460,7 +460,7 @@ func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
 	if err = store.CommitResultPage(context.Background(), claimed, 0, first, "next", 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err = db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(context.Background(), "worker-two", time.Second)
