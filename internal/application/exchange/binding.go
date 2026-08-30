@@ -1,9 +1,15 @@
 package exchange
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +170,9 @@ func (b *Binding) processImport(ctx context.Context, x persistence.WorkItem) err
 	if !ok {
 		return fmt.Errorf("import provider unavailable")
 	}
+	if artifactProvider, supportsArtifacts := p.(modulehost.ImportArtifactProvider); supportsArtifacts {
+		return b.processImportArtifact(ctx, x, artifactProvider)
+	}
 	total, rejected, e := b.readImport(ctx, x, p.ValidateImportBatch)
 	if e != nil {
 		return e
@@ -183,6 +192,46 @@ func (b *Binding) processImport(ctx context.Context, x persistence.WorkItem) err
 	}
 	if e = b.store.Progress(ctx, x, total, total); e != nil {
 		return e
+	}
+	return b.store.Complete(ctx, x, nil)
+}
+
+func (b *Binding) processImportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ImportArtifactProvider) error {
+	metadata := struct {
+		Filename    string          `json:"filename"`
+		ContentType string          `json:"content_type"`
+		Options     json.RawMessage `json:"options,omitempty"`
+	}{}
+	if err := json.Unmarshal(x.Payload, &metadata); err != nil {
+		return fmt.Errorf("decode Data Exchange import artifact metadata: %w", err)
+	}
+	invoke := func(handle func(context.Context, dataexchange.ImportArtifact) (dataexchange.ImportArtifactResult, error)) (dataexchange.ImportArtifactResult, error) {
+		source, err := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
+		if err != nil {
+			return dataexchange.ImportArtifactResult{}, err
+		}
+		defer source.Close()
+		return handle(ctx, dataexchange.ImportArtifact{
+			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.ID,
+			Filename: metadata.Filename, ContentType: metadata.ContentType, Options: append([]byte(nil), metadata.Options...), Content: source,
+		})
+	}
+	validated, err := invoke(provider.ValidateImportArtifact)
+	if err != nil {
+		return err
+	}
+	if err := b.store.Progress(ctx, x, 0, validated.Records); err != nil {
+		return err
+	}
+	applied, err := invoke(provider.ApplyImportArtifact)
+	if err != nil {
+		return err
+	}
+	if applied.Records != validated.Records {
+		return fmt.Errorf("Data Exchange import artifact applied %d records; validated %d", applied.Records, validated.Records)
+	}
+	if err := b.store.Progress(ctx, x, applied.Records, applied.Records); err != nil {
+		return err
 	}
 	return b.store.Complete(ctx, x, nil)
 }
@@ -235,6 +284,9 @@ func (b *Binding) processExport(ctx context.Context, x persistence.WorkItem) err
 	p, ok := b.host.ExportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("export provider unavailable")
+	}
+	if artifactProvider, supportsArtifacts := p.(modulehost.ExportArtifactProvider); supportsArtifacts {
+		return b.processExportArtifact(ctx, x, p, artifactProvider)
 	}
 	plan := dataexchange.ExportPlan{
 		Filename:    x.ObjectKey + ".csv",
@@ -318,6 +370,95 @@ func (b *Binding) processExport(ctx context.Context, x persistence.WorkItem) err
 		}
 	}
 	return b.store.Complete(ctx, x, a)
+}
+
+func (b *Binding) processExportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
+	artifact, err := artifactProvider.BuildExportArtifact(ctx, dataexchange.ExportArtifactRequest{
+		Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID,
+		Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt,
+	})
+	if err != nil {
+		return err
+	}
+	if artifact.Content == nil {
+		return fmt.Errorf("export artifact provider returned no content")
+	}
+	defer artifact.Content.Close()
+	artifact.Filename = strings.TrimSpace(artifact.Filename)
+	artifact.ContentType = strings.TrimSpace(artifact.ContentType)
+	if artifact.Filename == "" || artifact.ContentType == "" || artifact.ExpiresAt.IsZero() || artifact.Records < 0 {
+		return fmt.Errorf("export artifact provider returned an incomplete artifact")
+	}
+	const chunkSize = 8 << 20
+	buffer := make([]byte, chunkSize)
+	sequence := x.Job.ResultChunks
+	offset := int64(0)
+	if strings.TrimSpace(x.Job.Cursor) != "" {
+		parsed, parseErr := strconv.ParseInt(x.Job.Cursor, 10, 64)
+		if parseErr != nil || parsed < 0 {
+			return fmt.Errorf("invalid export artifact cursor %q", x.Job.Cursor)
+		}
+		offset = parsed
+	}
+	reader := bufio.NewReader(artifact.Content)
+	if offset > 0 {
+		committedSHA, committedSize, identityErr := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+		if identityErr != nil {
+			return identityErr
+		}
+		if committedSize != offset {
+			return fmt.Errorf("resume export artifact cursor %d does not match committed bytes %d", offset, committedSize)
+		}
+		prefix := sha256.New()
+		skipped, skipErr := io.CopyN(prefix, reader, offset)
+		if skipErr != nil || skipped != offset {
+			return fmt.Errorf("resume export artifact at byte %d: %w", offset, skipErr)
+		}
+		if hex.EncodeToString(prefix.Sum(nil)) != committedSHA {
+			return fmt.Errorf("resume export artifact prefix changed before byte %d", offset)
+		}
+	}
+	// An empty cursor with committed chunks is the durable terminal-page marker.
+	// Rebuild metadata for finalization without duplicating artifact content.
+	if sequence == 0 || strings.TrimSpace(x.Job.Cursor) != "" {
+		for {
+			read, readErr := io.ReadFull(reader, buffer)
+			if read > 0 {
+				offset += int64(read)
+				nextCursor := ""
+				if _, peekErr := reader.Peek(1); peekErr == nil {
+					nextCursor = strconv.FormatInt(offset, 10)
+				} else if peekErr != io.EOF {
+					return peekErr
+				}
+				if err := b.store.CommitResultPage(ctx, x, sequence, append([]byte(nil), buffer[:read]...), nextCursor, artifact.Records, artifact.Records); err != nil {
+					return err
+				}
+				sequence++
+			}
+			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+				break
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}
+	sha, size, err := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+	if err != nil {
+		return err
+	}
+	record := &persistence.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: artifact.Filename, ContentType: artifact.ContentType, SHA256: sha, Size: size, ExpiresAt: artifact.ExpiresAt}
+	if finalizer, finalizes := provider.(modulehost.ExportCompletionProvider); finalizes {
+		if err := finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
+			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
+			Artifact: dataexchange.Artifact{ID: record.ID, Filename: record.Filename, ContentType: record.ContentType, SHA256: record.SHA256, Size: record.Size, ExpiresAt: record.ExpiresAt},
+			Rows:     artifact.Records, ResultChunks: sequence,
+		}); err != nil {
+			return err
+		}
+	}
+	return b.store.Complete(ctx, x, record)
 }
 
 var _ dataexchange.Binding = (*Binding)(nil)

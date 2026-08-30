@@ -1,10 +1,12 @@
 package module
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,53 @@ func (p *testImportProvider) ApplyImportBatch(_ context.Context, b dataexchange.
 type testExportProvider struct {
 	mu          sync.Mutex
 	completions []dataexchange.ExportCompletion
+}
+
+type testArtifactImportProvider struct {
+	validated, applied               string
+	validatedOptions, appliedOptions string
+}
+
+func (*testArtifactImportProvider) ValidateImportBatch(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error) {
+	return dataexchange.ImportBatchResult{}, nil
+}
+func (*testArtifactImportProvider) ApplyImportBatch(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error) {
+	return dataexchange.ImportBatchResult{}, nil
+}
+func (p *testArtifactImportProvider) ValidateImportArtifact(_ context.Context, artifact dataexchange.ImportArtifact) (dataexchange.ImportArtifactResult, error) {
+	raw, err := io.ReadAll(artifact.Content)
+	p.validated = string(raw)
+	p.validatedOptions = string(artifact.Options)
+	return dataexchange.ImportArtifactResult{Records: 2, Receipt: "validated"}, err
+}
+func (p *testArtifactImportProvider) ApplyImportArtifact(_ context.Context, artifact dataexchange.ImportArtifact) (dataexchange.ImportArtifactResult, error) {
+	raw, err := io.ReadAll(artifact.Content)
+	p.applied = string(raw)
+	p.appliedOptions = string(artifact.Options)
+	return dataexchange.ImportArtifactResult{Records: 2, Receipt: "applied"}, err
+}
+
+type testArtifactExportProvider struct {
+	completions []dataexchange.ExportCompletion
+	content     []byte
+}
+
+func (*testArtifactExportProvider) ReadExportPage(context.Context, dataexchange.ExportPageRequest) (dataexchange.ExportPage, error) {
+	return dataexchange.ExportPage{}, nil
+}
+func (p *testArtifactExportProvider) BuildExportArtifact(_ context.Context, request dataexchange.ExportArtifactRequest) (dataexchange.ExportArtifact, error) {
+	content := p.content
+	if content == nil {
+		content = []byte(`{"datasets":[{"name":"users"}]}`)
+	}
+	return dataexchange.ExportArtifact{
+		Filename: "identity-bundle.json", ContentType: "application/json", ExpiresAt: request.CreatedAt.Add(time.Hour),
+		Content: io.NopCloser(bytes.NewReader(content)), Records: 2,
+	}, nil
+}
+func (p *testArtifactExportProvider) CompleteExport(_ context.Context, completion dataexchange.ExportCompletion) error {
+	p.completions = append(p.completions, completion)
+	return nil
 }
 
 func (*testExportProvider) PlanExport(_ context.Context, r dataexchange.ExportPlanRequest) (dataexchange.ExportPlan, error) {
@@ -108,6 +157,51 @@ func openTestBinding(t *testing.T) (dataexchange.Binding, *testImportProvider, *
 		t.Fatal(err)
 	}
 	return binding, ip, ep
+}
+
+func openArtifactTestBinding(t *testing.T) (dataexchange.Binding, *testArtifactImportProvider, *testArtifactExportProvider) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "artifact-exchange.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	imports := &testArtifactImportProvider{}
+	exports := &testArtifactExportProvider{}
+	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
+	binding, err := NewFactory(Options{}).OpenModule(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding, imports, exports
+}
+
+func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence.Store, *sql.DB, *testArtifactExportProvider) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "artifact-exchange.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	imports := &testArtifactImportProvider{}
+	exports := &testArtifactExportProvider{}
+	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
+	engine, err := persistence.NewEngine("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := persistence.SchemaMigrations(engine, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
+		t.Fatal(err)
+	}
+	store, err := persistence.NewStore(db, engine, "", host.WorkspaceContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exchange.NewBinding(dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host, store), store, db, exports
 }
 
 func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Store, *sql.DB) {
@@ -206,6 +300,125 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	defer provider.mu.Unlock()
 	if len(provider.completions) != 1 || provider.completions[0].Artifact.SHA256 != artifact.SHA256 || provider.completions[0].Rows != 2 || provider.completions[0].ReferenceID != "audit-1" {
 		t.Fatalf("completions=%+v", provider.completions)
+	}
+}
+
+func TestModuleProcessesCanonicalImportArtifactWithoutCSVDecoding(t *testing.T) {
+	binding, provider, _ := openArtifactTestBinding(t)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	content := `{"datasets":[{"name":"users"}]}`
+	job, replayed, err := binding.SubmitImport(t.Context(), dataexchange.ImportRequest{
+		Scope: scope, Provider: "identity", ObjectKey: "identity-portability", IdempotencyKey: "identity-import-1",
+		Filename: "identity-bundle.json", ContentType: "application/json", Options: []byte(`{"provider_readiness":{"oidc":true}}`), Source: strings.NewReader(content),
+	})
+	if err != nil || replayed {
+		t.Fatalf("submit artifact import: replayed=%v err=%v", replayed, err)
+	}
+	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
+	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+	completed := waitCompleted(t, binding, scope, job.ID)
+	if completed.Status != "completed" || provider.validated != content || provider.applied != content || provider.validatedOptions != `{"provider_readiness":{"oidc":true}}` || provider.appliedOptions != provider.validatedOptions {
+		t.Fatalf("completed=%+v validated=%q applied=%q", completed, provider.validated, provider.applied)
+	}
+}
+
+func TestModulePersistsCanonicalExportArtifact(t *testing.T) {
+	binding, _, provider := openArtifactTestBinding(t)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "identity", ObjectKey: "identity-portability", IdempotencyKey: "identity-export-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
+	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+	completed := waitCompleted(t, binding, scope, job.ID)
+	if completed.Status != "completed" {
+		t.Fatalf("completed=%+v", completed)
+	}
+	artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Content.Close()
+	raw, err := io.ReadAll(artifact.Content)
+	if err != nil || string(raw) != `{"datasets":[{"name":"users"}]}` || artifact.ContentType != "application/json" {
+		t.Fatalf("artifact=%+v content=%q err=%v", artifact, raw, err)
+	}
+	if len(provider.completions) != 1 || provider.completions[0].Rows != 2 {
+		t.Fatalf("completions=%+v", provider.completions)
+	}
+}
+
+func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
+	binding, store, db, provider := openArtifactTestBindingStore(t)
+	const chunkSize = 8 << 20
+	provider.content = bytes.Repeat([]byte("identity-bundle-byte\n"), chunkSize/21+500)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "identity", ObjectKey: "identity-portability", IdempotencyKey: "resume-artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.Claim(t.Context(), "worker-one", time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := store.CommitResultPage(t.Context(), claimed, 0, provider.content[:chunkSize], strconv.Itoa(chunkSize), 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, ok, err := store.Claim(t.Context(), "worker-two", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("reclaim: ok=%v err=%v", ok, err)
+	}
+	if reclaimed.Job.Cursor != strconv.Itoa(chunkSize) || reclaimed.Job.ResultChunks != 1 {
+		t.Fatalf("cursor=%q chunks=%d", reclaimed.Job.Cursor, reclaimed.Job.ResultChunks)
+	}
+	if err := binding.Process(t.Context(), reclaimed); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Content.Close()
+	content, err := io.ReadAll(artifact.Content)
+	if err != nil || !bytes.Equal(content, provider.content) {
+		t.Fatalf("resumed artifact bytes=%d want=%d err=%v", len(content), len(provider.content), err)
+	}
+	if len(provider.completions) != 1 || provider.completions[0].ResultChunks != 2 {
+		t.Fatalf("completions=%+v", provider.completions)
+	}
+}
+
+func TestExpiredLeaseRejectsChangedCanonicalArtifactPrefix(t *testing.T) {
+	binding, store, db, provider := openArtifactTestBindingStore(t)
+	const chunkSize = 8 << 20
+	provider.content = bytes.Repeat([]byte("a"), chunkSize+64)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "identity", ObjectKey: "identity-portability", IdempotencyKey: "changed-artifact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := store.Claim(t.Context(), "worker-one", time.Millisecond)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := store.CommitResultPage(t.Context(), claimed, 0, append([]byte(nil), provider.content[:chunkSize]...), strconv.Itoa(chunkSize), 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	provider.content = append([]byte(nil), provider.content...)
+	provider.content[0] = 'b'
+	reclaimed, ok, err := store.Claim(t.Context(), "worker-two", time.Second)
+	if err != nil || !ok {
+		t.Fatalf("reclaim: ok=%v err=%v", ok, err)
+	}
+	if err := binding.Process(t.Context(), reclaimed); err == nil || !strings.Contains(err.Error(), "prefix changed") {
+		t.Fatalf("changed canonical artifact was accepted: %v", err)
 	}
 }
 

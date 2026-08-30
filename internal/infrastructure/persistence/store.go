@@ -81,6 +81,13 @@ func (s *Store) registerScope(ctx context.Context, executor sqlExecer, workspace
 	return err
 }
 
+type importRequestPayload struct {
+	Filename    string          `json:"filename"`
+	ContentType string          `json:"content_type"`
+	MaxBytes    int64           `json:"max_bytes"`
+	Options     json.RawMessage `json:"options,omitempty"`
+}
+
 func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	id := jobID(r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey)
@@ -124,7 +131,10 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 		}
 	}
 	sourceHash := hex.EncodeToString(h.Sum(nil))
-	payload, _ := json.Marshal(map[string]any{"filename": r.Filename, "content_type": r.ContentType, "max_bytes": limit})
+	payload, err := json.Marshal(importRequestPayload{Filename: r.Filename, ContentType: r.ContentType, MaxBytes: limit, Options: append(json.RawMessage(nil), r.Options...)})
+	if err != nil {
+		return dataexchange.Job{}, false, fmt.Errorf("encode Data Exchange import request: %w", err)
+	}
 	requestHash := fingerprint([]byte(r.Provider), []byte(r.ObjectKey), payload, []byte(sourceHash))
 	var existingHash string
 	lookup, lookupArgs, buildErr := ormbuilder.NewSelectBuilder(s.renderer, "data_exchange_jobs").Columns("request_sha256").Where(ormbuilder.And(
@@ -176,7 +186,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	if err = tx.Commit(); err != nil {
 		return dataexchange.Job{}, false, err
 	}
-	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "import", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, CreatedAt: now, UpdatedAt: now}, false, nil
+	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "import", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, Options: append([]byte(nil), r.Options...), CreatedAt: now, UpdatedAt: now}, false, nil
 }
 
 func (s *Store) requestHash(ctx context.Context, id string) (string, error) {
@@ -240,6 +250,12 @@ func scanJob(row scanner) (dataexchange.Job, error) {
 		return j, err
 	}
 	j.Options = append([]byte(nil), options...)
+	if j.Operation == "import" {
+		var payload importRequestPayload
+		if json.Unmarshal(options, &payload) == nil {
+			j.Options = append([]byte(nil), payload.Options...)
+		}
+	}
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	j.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	return j, nil

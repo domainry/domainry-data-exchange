@@ -1,5 +1,7 @@
 module github.com/domainry/domainry-data-exchange
 
+replace github.com/domainry/domainry-data-exchange-sdk => ../domainry-data-exchange-sdk
+
 go 1.26.0
 
 require (
