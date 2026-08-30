@@ -1,4 +1,4 @@
-package module
+package exchange
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	"github.com/domainry/domainry-data-exchange/fileengine"
+	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 )
 
 const importBatchRows = 500
@@ -18,21 +18,21 @@ const importMaxRows = 1_000_000
 const importMaxColumns = 512
 const exportPageMaxBytes = 16 << 20
 
-type binding struct {
+type Binding struct {
 	application dataexchange.ApplicationRef
 	host        modulehost.Host
-	store       *sqlStore
+	store       *persistence.Store
 	closeOnce   sync.Once
 	cancel      context.CancelFunc
 }
 
-func newBinding(a dataexchange.ApplicationRef, h modulehost.Host, s *sqlStore) *binding {
-	return &binding{application: a, host: h, store: s}
+func NewBinding(a dataexchange.ApplicationRef, h modulehost.Host, s *persistence.Store) *Binding {
+	return &Binding{application: a, host: h, store: s}
 }
-func (*binding) Descriptor() dataexchange.Descriptor {
+func (*Binding) Descriptor() dataexchange.Descriptor {
 	return dataexchange.Descriptor{ProtocolVersion: dataexchange.ProtocolVersionV1, Mode: dataexchange.DeploymentModeModule, Capabilities: []string{"streaming_import", "paged_export", "durable_chunks", "artifact_lifecycle"}}
 }
-func (b *binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
+func (b *Binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, false, e
 	}
@@ -42,9 +42,9 @@ func (b *binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest
 	if _, ok := b.host.ImportProvider(r.Provider); !ok {
 		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange import provider %q is unavailable", r.Provider)
 	}
-	return b.store.submitImport(ctx, r)
+	return b.store.SubmitImport(ctx, r)
 }
-func (b *binding) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
+func (b *Binding) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, false, e
 	}
@@ -54,27 +54,27 @@ func (b *binding) SubmitExport(ctx context.Context, r dataexchange.ExportRequest
 	if _, ok := b.host.ExportProvider(r.Provider); !ok {
 		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange export provider %q is unavailable", r.Provider)
 	}
-	return b.store.submitExport(ctx, r)
+	return b.store.SubmitExport(ctx, r)
 }
-func (b *binding) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (b *Binding) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
-	return b.store.job(ctx, r)
+	return b.store.Job(ctx, r)
 }
-func (b *binding) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (b *Binding) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
-	return b.store.cancel(ctx, r)
+	return b.store.Cancel(ctx, r)
 }
-func (b *binding) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
+func (b *Binding) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Artifact{}, e
 	}
-	return b.store.artifact(ctx, r)
+	return b.store.Artifact(ctx, r)
 }
-func (b *binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-chan struct{} {
+func (b *Binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-chan struct{} {
 	done := make(chan struct{})
 	if !c.Enabled {
 		close(done)
@@ -91,10 +91,10 @@ func (b *binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 		t := time.NewTicker(c.PollInterval)
 		defer t.Stop()
 		for {
-			if x, ok, e := b.store.claim(ctx, owner, c.LeaseTTL); e == nil && ok {
+			if x, ok, e := b.store.Claim(ctx, owner, c.LeaseTTL); e == nil && ok {
 				if e = b.processWithHeartbeat(ctx, x, c.LeaseTTL); e != nil {
-					failCtx := b.store.scoped(context.WithoutCancel(ctx), x.Scope.WorkspaceID, owner)
-					_ = b.store.fail(failCtx, x, "processing_failed")
+					failCtx := b.store.Scoped(context.WithoutCancel(ctx), x.Scope.WorkspaceID, owner)
+					_ = b.store.Fail(failCtx, x, "processing_failed")
 				}
 				continue
 			}
@@ -108,7 +108,7 @@ func (b *binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 	return done
 }
 
-func (b *binding) processWithHeartbeat(parent context.Context, x workItem, ttl time.Duration) error {
+func (b *Binding) processWithHeartbeat(parent context.Context, x persistence.WorkItem, ttl time.Duration) error {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -127,19 +127,19 @@ func (b *binding) processWithHeartbeat(parent context.Context, x workItem, ttl t
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := b.store.heartbeat(b.store.scoped(ctx, x.Scope.WorkspaceID, x.Job.LeaseOwner), x, ttl); err != nil {
+				if err := b.store.Heartbeat(b.store.Scoped(ctx, x.Scope.WorkspaceID, x.Job.LeaseOwner), x, ttl); err != nil {
 					cancel()
 					return
 				}
 			}
 		}
 	}()
-	err := b.process(ctx, x)
+	err := b.Process(ctx, x)
 	cancel()
 	<-done
 	return err
 }
-func (b *binding) Close(context.Context) error {
+func (b *Binding) Close(context.Context) error {
 	b.closeOnce.Do(func() {
 		if b.cancel != nil {
 			b.cancel()
@@ -147,8 +147,8 @@ func (b *binding) Close(context.Context) error {
 	})
 	return nil
 }
-func (b *binding) process(ctx context.Context, x workItem) error {
-	ctx = b.store.scoped(ctx, x.Scope.WorkspaceID, x.Scope.ActorID)
+func (b *Binding) Process(ctx context.Context, x persistence.WorkItem) error {
+	ctx = b.store.Scoped(ctx, x.Scope.WorkspaceID, x.Scope.ActorID)
 	switch x.Job.Operation {
 	case "import":
 		return b.processImport(ctx, x)
@@ -159,7 +159,7 @@ func (b *binding) process(ctx context.Context, x workItem) error {
 	}
 }
 
-func (b *binding) processImport(ctx context.Context, x workItem) error {
+func (b *Binding) processImport(ctx context.Context, x persistence.WorkItem) error {
 	p, ok := b.host.ImportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("import provider unavailable")
@@ -171,7 +171,7 @@ func (b *binding) processImport(ctx context.Context, x workItem) error {
 	if rejected > 0 {
 		return fmt.Errorf("Data Exchange import rejected %d rows", rejected)
 	}
-	if e = b.store.progress(ctx, x, 0, total); e != nil {
+	if e = b.store.Progress(ctx, x, 0, total); e != nil {
 		return e
 	}
 	_, rejected, e = b.readImport(ctx, x, p.ApplyImportBatch)
@@ -181,16 +181,16 @@ func (b *binding) processImport(ctx context.Context, x workItem) error {
 	if rejected > 0 {
 		return fmt.Errorf("Data Exchange import apply rejected %d rows", rejected)
 	}
-	if e = b.store.progress(ctx, x, total, total); e != nil {
+	if e = b.store.Progress(ctx, x, total, total); e != nil {
 		return e
 	}
-	return b.store.complete(ctx, x, nil)
+	return b.store.Complete(ctx, x, nil)
 }
 
 type importHandler func(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error)
 
-func (b *binding) readImport(ctx context.Context, x workItem, handle importHandler) (int, int, error) {
-	source, e := b.store.chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
+func (b *Binding) readImport(ctx context.Context, x persistence.WorkItem, handle importHandler) (int, int, error) {
+	source, e := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
 	if e != nil {
 		return 0, 0, e
 	}
@@ -210,7 +210,7 @@ func (b *binding) readImport(ctx context.Context, x workItem, handle importHandl
 		rows = rows[:0]
 		return err
 	}
-	headers, e = fileengine.DecodeCSV(ctx, source, fileengine.CSVDecodeLimits{MaxRows: importMaxRows, MaxColumns: importMaxColumns}, func(decodedHeaders []string, record fileengine.CSVRecord) error {
+	headers, e = dataexchange.DecodeCSV(ctx, source, dataexchange.CSVDecodeLimits{MaxRows: importMaxRows, MaxColumns: importMaxColumns}, func(decodedHeaders []string, record dataexchange.CSVRecord) error {
 		headers = decodedHeaders
 		total++
 		rows = append(rows, dataexchange.ImportRow{Number: record.Number, Values: record.Values})
@@ -223,7 +223,7 @@ func (b *binding) readImport(ctx context.Context, x workItem, handle importHandl
 		return total, rejected, e
 	}
 	if len(headers) == 0 {
-		return total, rejected, fileengine.ErrHeaderRequired
+		return total, rejected, dataexchange.ErrHeaderRequired
 	}
 	if e = flush(); e != nil {
 		return total, rejected, e
@@ -231,7 +231,7 @@ func (b *binding) readImport(ctx context.Context, x workItem, handle importHandl
 	return total, rejected, nil
 }
 
-func (b *binding) processExport(ctx context.Context, x workItem) error {
+func (b *Binding) processExport(ctx context.Context, x persistence.WorkItem) error {
 	p, ok := b.host.ExportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("export provider unavailable")
@@ -265,7 +265,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 			return e
 		}
 		var buf bytes.Buffer
-		w := fileengine.NewCSVEncoder(&buf, exportPageMaxBytes)
+		w := dataexchange.NewCSVEncoder(&buf, exportPageMaxBytes)
 		if !header {
 			if len(page.Columns) == 0 {
 				return fmt.Errorf("export provider returned no columns")
@@ -290,7 +290,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 		nextCursor := page.NextCursor
 		total += len(page.Rows)
 		if len(content) > 0 {
-			if e = b.store.commitResultPage(ctx, x, seq, content, nextCursor, total, page.Total); e != nil {
+			if e = b.store.CommitResultPage(ctx, x, seq, content, nextCursor, total, page.Total); e != nil {
 				return e
 			}
 			seq++
@@ -303,11 +303,11 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 		}
 		cursor = nextCursor
 	}
-	sha, size, e := b.store.resultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+	sha, size, e := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
 	if e != nil {
 		return e
 	}
-	a := &artifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
+	a := &persistence.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
 	if finalizer, finalizes := p.(modulehost.ExportCompletionProvider); finalizes {
 		if e = finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
 			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
@@ -317,7 +317,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 			return e
 		}
 	}
-	return b.store.complete(ctx, x, a)
+	return b.store.Complete(ctx, x, a)
 }
 
-var _ dataexchange.Binding = (*binding)(nil)
+var _ dataexchange.Binding = (*Binding)(nil)

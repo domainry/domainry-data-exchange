@@ -1,13 +1,19 @@
-package module
+package persistence
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	ormbuilder "github.com/domainry/domainry-orm/builder"
+	ormdialect "github.com/domainry/domainry-orm/dialect"
 )
 
-func schemaMigrations(driver, schema string) ([]modulehost.Migration, error) {
+// SchemaMigrations preserves the byte identity of the released v1/v2 raw DDL
+// because the host migration ledger checksums source migrations. Re-rendering
+// those historical statements through the ORM would corrupt existing ledgers.
+// Every new migration below is built with domainry-orm.
+func SchemaMigrations(driver, schema string) ([]modulehost.Migration, error) {
 	driver = strings.ToLower(strings.TrimSpace(driver))
 	if driver != "sqlite" && driver != "mysql" && driver != "postgres" && driver != "pgx" {
 		return nil, fmt.Errorf("Data Exchange database driver %q is unsupported", driver)
@@ -35,5 +41,21 @@ func schemaMigrations(driver, schema string) ([]modulehost.Migration, error) {
 		`id ` + key + ` PRIMARY KEY, workspace_id ` + key + ` NOT NULL, job_id ` + key + ` NOT NULL, filename ` + text + ` NOT NULL, content_type ` + text + ` NOT NULL, content_sha256 ` + key + ` NOT NULL, size_bytes BIGINT NOT NULL, expires_at ` + key + ` NOT NULL, created_at ` + key + ` NOT NULL)`
 	queueScopes := `CREATE TABLE IF NOT EXISTS ` + prefix + `data_exchange_queue_scopes (scope_key ` + key + ` PRIMARY KEY, updated_at ` + key + ` NOT NULL)`
 	ownerReference := `ALTER TABLE ` + prefix + `data_exchange_jobs ADD COLUMN reference_id ` + key + ` NOT NULL DEFAULT ''`
-	return []modulehost.Migration{{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts}, {ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}, {ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference}}, nil
+	renderer, err := ormdialect.ParseRenderer(driver, schema, "")
+	if err != nil {
+		return nil, err
+	}
+	attempts, _, err := ormbuilder.NewAddColumnBuilder(renderer, "data_exchange_jobs", ormbuilder.DefineColumn("attempt_count", ormbuilder.IntegerType()).NotNull().DefaultValue(0)).Build()
+	if err != nil {
+		return nil, err
+	}
+	nextAttempt, _, err := ormbuilder.NewAddColumnBuilder(renderer, "data_exchange_jobs", ormbuilder.DefineColumn("next_attempt_at", ormbuilder.TextKeyType(191)).NotNull().DefaultValue("")).Build()
+	if err != nil {
+		return nil, err
+	}
+	return []modulehost.Migration{
+		{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts},
+		{ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}, {ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference},
+		{ID: "data_exchange_job_attempt_count_v3", SQL: attempts}, {ID: "data_exchange_job_next_attempt_v4", SQL: nextAttempt},
+	}, nil
 }

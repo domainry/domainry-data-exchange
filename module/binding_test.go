@@ -12,6 +12,8 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	"github.com/domainry/domainry-data-exchange/internal/application/exchange"
+	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	_ "modernc.org/sqlite"
 )
 
@@ -108,9 +110,31 @@ func openTestBinding(t *testing.T) (dataexchange.Binding, *testImportProvider, *
 	return binding, ip, ep
 }
 
+func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Store, *sql.DB) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "exchange.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
+	migrations, err := persistence.SchemaMigrations("sqlite", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
+		t.Fatal(err)
+	}
+	store, err := persistence.NewStore(db, "sqlite", "", h.WorkspaceContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exchange.NewBinding(dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, h, store), store, db
+}
+
 func waitCompleted(t *testing.T, b dataexchange.Binding, scope dataexchange.Scope, id string) dataexchange.Job {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		j, err := b.Job(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: id})
 		if err == nil && (j.Status == "completed" || j.Status == "failed") {
@@ -125,7 +149,7 @@ func waitCompleted(t *testing.T, b dataexchange.Binding, scope dataexchange.Scop
 func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
 	b, p, _ := openTestBinding(t)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
-	large := strings.Repeat("x", sourceChunkBytes+64)
+	large := strings.Repeat("x", (1<<20)+64)
 	job, replay, err := b.SubmitImport(context.Background(), dataexchange.ImportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "import-1", Source: strings.NewReader("id,name\n1," + large + "\n2,two\n"), MaxBytes: 2 << 20})
 	if err != nil || replay {
 		t.Fatalf("submit: replay=%v err=%v", replay, err)
@@ -197,41 +221,41 @@ func TestModuleNeverAppliesRejectedImport(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.applied != 0 {
-		t.Fatalf("rejected import applied %d rows", p.applied)
+	if p.validated != 3 || p.applied != 0 {
+		t.Fatalf("validated=%d applied=%d; want three bounded attempts and no apply", p.validated, p.applied)
 	}
 }
 
 func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
-	contract, _, _ := openTestBinding(t)
-	b := contract.(*binding)
+	contract, store, db := openTestBindingStore(t)
+	b := contract.(*exchange.Binding)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
 	job, _, err := b.SubmitExport(context.Background(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "resume-export"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, ok, err := b.store.claim(context.Background(), "worker-one", time.Millisecond)
+	claimed, ok, err := store.Claim(context.Background(), "worker-one", time.Millisecond)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	first := []byte("id,name\n1,one\n")
-	if err = b.store.commitResultPage(context.Background(), claimed, 0, first, "next", 1, 2); err != nil {
+	if err = store.CommitResultPage(context.Background(), claimed, 0, first, "next", 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.store.db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err = db.Exec(`UPDATE data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, ok, err := b.store.claim(context.Background(), "worker-two", time.Second)
+	reclaimed, ok, err := store.Claim(context.Background(), "worker-two", time.Second)
 	if err != nil || !ok {
 		t.Fatalf("reclaim: ok=%v err=%v", ok, err)
 	}
 	if reclaimed.Job.Cursor != "next" || reclaimed.Job.ResultChunks != 1 {
 		t.Fatalf("cursor=%q chunks=%d", reclaimed.Job.Cursor, reclaimed.Job.ResultChunks)
 	}
-	if err = b.store.progress(context.Background(), claimed, 2, 2); err == nil || !strings.Contains(err.Error(), "stale") {
+	if err = store.Progress(context.Background(), claimed, 2, 2); err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("stale worker progress error=%v", err)
 	}
-	if err = b.processExport(context.Background(), reclaimed); err != nil {
+	if err = b.Process(context.Background(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := b.Download(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
@@ -265,5 +289,18 @@ func TestImportIdempotencyVerifiesStreamFingerprint(t *testing.T) {
 	}
 	if _, _, err = b.SubmitImport(context.Background(), request("id,name\n1,different\n")); err == nil || !strings.Contains(err.Error(), "different source") {
 		t.Fatalf("different source error=%v", err)
+	}
+}
+
+func TestExportIdempotencyRejectsChangedOwnerReference(t *testing.T) {
+	b, _, _ := openTestBinding(t)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	request := dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "same-export", ReferenceID: "audit-one"}
+	if _, replayed, err := b.SubmitExport(t.Context(), request); err != nil || replayed {
+		t.Fatalf("first submit replayed=%v err=%v", replayed, err)
+	}
+	request.ReferenceID = "audit-two"
+	if _, _, err := b.SubmitExport(t.Context(), request); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("changed owner reference was accepted: %v", err)
 	}
 }

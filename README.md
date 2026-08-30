@@ -2,10 +2,9 @@
 
 Data Exchange owns the engineering mechanics of large tabular import/export. Runtime applications provide authorized domain operations through the SDK Provider interfaces; they do not own upload chunks, worker checkpoints, generated artifacts, or file parsing loops.
 
-The `fileengine` package is the single bounded CSV/chunk implementation used by
-the durable Module and by Runtime's temporary synchronous compatibility paths.
-Keeping it in this repository prevents Runtime from growing a second parser or
-artifact generator with different limits and failure semantics.
+The deployment-neutral SDK owns the single bounded CSV codec. The durable
+Module owns the only import orchestration and chunk persistence path; Runtime
+does not import implementation packages or maintain a second file engine.
 
 ## Deployments
 
@@ -24,6 +23,8 @@ Both deployments expose the same `dataexchange.Binding`. Runtime composition sel
   durable commit, preventing a provider page from becoming an unbounded buffer.
 - Expired leases resume from the last committed cursor.
 - Heartbeats and fencing tokens prevent a reclaimed worker from committing stale work.
+- Processing failures retry three times with bounded exponential backoff before
+  the job enters its terminal failed/dead-letter state.
 - Workspace queue discovery is separated from workspace-scoped job access for PostgreSQL RLS compatibility.
 - Artifact downloads stream ordered result chunks.
 
