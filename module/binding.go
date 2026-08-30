@@ -243,7 +243,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 	}
 	if planner, planned := p.(modulehost.ExportPlanningProvider); planned {
 		var e error
-		plan, e = planner.PlanExport(ctx, dataexchange.ExportPlanRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, Options: x.Payload, JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt})
+		plan, e = planner.PlanExport(ctx, dataexchange.ExportPlanRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt})
 		if e != nil {
 			return e
 		}
@@ -260,7 +260,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 	// between that commit and completion, resume finalization instead of reading
 	// the export again and duplicating every row.
 	for seq == 0 || cursor != "" {
-		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.ID, ArtifactExpiresAt: plan.ExpiresAt})
+		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.ID, ArtifactExpiresAt: plan.ExpiresAt})
 		if e != nil {
 			return e
 		}
@@ -310,7 +310,7 @@ func (b *binding) processExport(ctx context.Context, x workItem) error {
 	a := &artifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
 	if finalizer, finalizes := p.(modulehost.ExportCompletionProvider); finalizes {
 		if e = finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
-			Scope: x.Scope, ObjectKey: x.ObjectKey, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
+			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
 			Artifact: dataexchange.Artifact{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, SHA256: a.SHA256, Size: a.Size, ExpiresAt: a.ExpiresAt},
 			Rows:     total, ResultChunks: seq,
 		}); e != nil {

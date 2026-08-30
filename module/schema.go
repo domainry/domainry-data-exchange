@@ -34,5 +34,6 @@ func schemaMigrations(driver, schema string) ([]modulehost.Migration, error) {
 	artifacts := `CREATE TABLE IF NOT EXISTS ` + prefix + `data_exchange_artifacts (` +
 		`id ` + key + ` PRIMARY KEY, workspace_id ` + key + ` NOT NULL, job_id ` + key + ` NOT NULL, filename ` + text + ` NOT NULL, content_type ` + text + ` NOT NULL, content_sha256 ` + key + ` NOT NULL, size_bytes BIGINT NOT NULL, expires_at ` + key + ` NOT NULL, created_at ` + key + ` NOT NULL)`
 	queueScopes := `CREATE TABLE IF NOT EXISTS ` + prefix + `data_exchange_queue_scopes (scope_key ` + key + ` PRIMARY KEY, updated_at ` + key + ` NOT NULL)`
-	return []modulehost.Migration{{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts}, {ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}}, nil
+	ownerReference := `ALTER TABLE ` + prefix + `data_exchange_jobs ADD COLUMN reference_id ` + key + ` NOT NULL DEFAULT ''`
+	return []modulehost.Migration{{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts}, {ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}, {ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference}}, nil
 }

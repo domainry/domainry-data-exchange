@@ -146,7 +146,7 @@ func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
 func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	b, _, provider := openTestBinding(t)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
-	job, _, err := b.SubmitExport(context.Background(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "export-1"})
+	job, _, err := b.SubmitExport(context.Background(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "export-1", ReferenceID: "audit-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	if completed.Status != "completed" {
 		t.Fatalf("status=%s code=%s", completed.Status, completed.ErrorCode)
 	}
-	if string(completed.Options) != "" {
+	if string(completed.Options) != "" || completed.ReferenceID != "audit-1" {
 		t.Fatalf("options=%q", completed.Options)
 	}
 	artifact, err := b.Download(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
@@ -176,7 +176,7 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
-	if len(provider.completions) != 1 || provider.completions[0].Artifact.SHA256 != artifact.SHA256 || provider.completions[0].Rows != 2 {
+	if len(provider.completions) != 1 || provider.completions[0].Artifact.SHA256 != artifact.SHA256 || provider.completions[0].Rows != 2 || provider.completions[0].ReferenceID != "audit-1" {
 		t.Fatalf("completions=%+v", provider.completions)
 	}
 }
