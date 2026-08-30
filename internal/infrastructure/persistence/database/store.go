@@ -14,8 +14,8 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
-	ormbuilder "github.com/domainry/domainry-orm/builder"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
+	ormbuilder "github.com/domainry/domainry-orm/query"
 )
 
 const sourceChunkBytes = 1 << 20

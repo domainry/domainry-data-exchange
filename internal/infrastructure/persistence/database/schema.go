@@ -2,10 +2,10 @@ package database
 
 import (
 	"fmt"
+	ormschema "github.com/domainry/domainry-orm/schema"
 
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
-	ormbuilder "github.com/domainry/domainry-orm/builder"
 )
 
 // SchemaMigrations keeps released v1/v2 SQL byte-identical through the
@@ -34,11 +34,11 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 	queueScopes := `CREATE TABLE IF NOT EXISTS ` + queueScopesTable + ` (scope_key ` + key + ` PRIMARY KEY, updated_at ` + key + ` NOT NULL)`
 	ownerReference := `ALTER TABLE ` + jobsTable + ` ADD COLUMN reference_id ` + key + ` NOT NULL DEFAULT ''`
 	renderer := engine.Dialect().WithSchema(schema)
-	attempts, _, err := ormbuilder.NewAddColumnBuilder(renderer, "data_exchange_jobs", ormbuilder.DefineColumn("attempt_count", ormbuilder.IntegerType()).NotNull().DefaultValue(0)).Build()
+	attempts, _, err := ormschema.NewAddColumn(renderer, "data_exchange_jobs", ormschema.Column("attempt_count", ormschema.Integer()).NotNull().DefaultValue(0)).Build()
 	if err != nil {
 		return nil, err
 	}
-	nextAttempt, _, err := ormbuilder.NewAddColumnBuilder(renderer, "data_exchange_jobs", ormbuilder.DefineColumn("next_attempt_at", ormbuilder.TextKeyType(191)).NotNull().DefaultValue("")).Build()
+	nextAttempt, _, err := ormschema.NewAddColumn(renderer, "data_exchange_jobs", ormschema.Column("next_attempt_at", ormschema.TextKey(191)).NotNull().DefaultValue("")).Build()
 	if err != nil {
 		return nil, err
 	}
