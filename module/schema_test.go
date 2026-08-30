@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
 )
 
 func TestReleasedMigrationChecksumsRemainStable(t *testing.T) {
@@ -16,7 +17,7 @@ func TestReleasedMigrationChecksumsRemainStable(t *testing.T) {
 		"postgres": {"fbbe8edfb02a106da05b13849a981f82c5abfd7c7ac857225550de3759df8a8e", "4170bda0096b51baa2ddeb4b3b54c317a14ae0691816c9b909d83cc9c832f6e1", "afbf6dbdf1848d86eb5f9ce48ef03d82f93dfa3f01b37d4954cd16e0703884b9", "3e934a14ee76896cd35dd92804112d6855fa7246fe1e6e2466a2370852389578", "6533ecbfab2856faf35d9e7cb61a2ebf4ca6311323e63ea2432ca680604fcc93"},
 	}
 	for driver, checksums := range expected {
-		engine, err := persistence.NewEngine(driver)
+		engine, err := persistenceengine.NewEngine(driver)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -34,7 +35,7 @@ func TestReleasedMigrationChecksumsRemainStable(t *testing.T) {
 }
 
 func TestMySQLSchemaUsesIndexSafeIdentityColumns(t *testing.T) {
-	engine, err := persistence.NewEngine("mysql")
+	engine, err := persistenceengine.NewEngine("mysql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.driver, func(t *testing.T) {
-			engine, err := persistence.NewEngine(test.driver)
+			engine, err := persistenceengine.NewEngine(test.driver)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,12 +1,10 @@
 module github.com/domainry/domainry-data-exchange
 
-replace github.com/domainry/domainry-data-exchange-sdk => ../domainry-data-exchange-sdk
-
 go 1.26.0
 
 require (
-	github.com/domainry/domainry-data-exchange-sdk v0.3.1-0.20260830024026-64866b01d3a6
-	github.com/domainry/domainry-orm v0.1.25-0.20260829222221-e316e284305e
+	github.com/domainry/domainry-data-exchange-sdk v0.3.1
+	github.com/domainry/domainry-orm v0.1.25
 	modernc.org/sqlite v1.53.0
 )
 

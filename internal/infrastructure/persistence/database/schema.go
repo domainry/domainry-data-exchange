@@ -1,15 +1,16 @@
-package persistence
+package database
 
 import (
 	"fmt"
 
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	ormbuilder "github.com/domainry/domainry-orm/builder"
 )
 
 // SchemaMigrations keeps released v1/v2 SQL byte-identical through the
 // concrete Engine's historical profile. New migrations use domainry-orm.
-func SchemaMigrations(engine Engine, schema string) ([]modulehost.Migration, error) {
+func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]modulehost.Migration, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("Data Exchange database engine is required")
 	}

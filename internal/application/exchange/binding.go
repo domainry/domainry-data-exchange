@@ -16,7 +16,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
 )
 
 const importBatchRows = 500

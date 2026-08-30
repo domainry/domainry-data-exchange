@@ -15,7 +15,8 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	"github.com/domainry/domainry-data-exchange/internal/application/exchange"
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
 	_ "modernc.org/sqlite"
 )
 
@@ -186,7 +187,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	imports := &testArtifactImportProvider{}
 	exports := &testArtifactExportProvider{}
 	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
-	engine, err := persistence.NewEngine("sqlite")
+	engine, err := persistenceengine.NewEngine("sqlite")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
-	engine, err := persistence.NewEngine("sqlite")
+	engine, err := persistenceengine.NewEngine("sqlite")
 	if err != nil {
 		t.Fatal(err)
 	}

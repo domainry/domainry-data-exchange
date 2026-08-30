@@ -1,4 +1,4 @@
-package persistence
+package database
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	ormbuilder "github.com/domainry/domainry-orm/builder"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 )
@@ -23,12 +24,12 @@ const retryInitialDelay = time.Second
 
 type Store struct {
 	db               *sql.DB
-	engine           Engine
+	engine           persistenceengine.Engine
 	renderer         ormdialect.Renderer
 	workspaceContext func(context.Context, string, string) context.Context
 }
 
-func NewStore(db *sql.DB, engine Engine, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
+func NewStore(db *sql.DB, engine persistenceengine.Engine, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("Data Exchange database engine is required")
 	}

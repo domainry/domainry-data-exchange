@@ -17,6 +17,16 @@ func TestRequiredDeploymentPackagesExist(t *testing.T) {
 	}
 }
 
+func TestModuleUsesTaggedDependencies(t *testing.T) {
+	content, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "replace ") || strings.Contains(string(content), "../domainry-") {
+		t.Fatal("Data Exchange must consume released module tags, not local directory replacements")
+	}
+}
+
 func TestPublicFacadesStayThinAndPersistenceStaysInternal(t *testing.T) {
 	for _, path := range []string{"../../module", "../../remote"} {
 		entries, err := os.ReadDir(path)

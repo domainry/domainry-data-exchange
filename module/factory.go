@@ -7,7 +7,8 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	"github.com/domainry/domainry-data-exchange/internal/application/exchange"
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
 )
 
 type Options struct{}
@@ -27,7 +28,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if host == nil || host.Database() == nil || host.Migrations() == nil {
 		return nil, fmt.Errorf("Data Exchange Module host is incomplete")
 	}
-	engine, err := persistence.NewEngine(host.Migrations().Driver())
+	engine, err := persistenceengine.NewEngine(host.Migrations().Driver())
 	if err != nil {
 		return nil, err
 	}
