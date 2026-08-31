@@ -3,7 +3,7 @@ module github.com/domainry/domainry-data-exchange
 go 1.26.0
 
 require (
-	github.com/domainry/domainry-data-exchange-sdk v0.3.1
+	github.com/domainry/domainry-data-exchange-sdk v0.3.2
 	github.com/domainry/domainry-orm v0.1.29
 	modernc.org/sqlite v1.57.0
 )
