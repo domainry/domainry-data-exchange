@@ -16,8 +16,9 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
+	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
-	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 )
 
 const importBatchRows = 500
@@ -28,12 +29,12 @@ const exportPageMaxBytes = 16 << 20
 type Service struct {
 	application dataexchange.ApplicationRef
 	host        modulehost.Host
-	store       *persistence.Store
+	store       dataexchangerepository.JobRepository
 	closeOnce   sync.Once
 	cancel      context.CancelFunc
 }
 
-func NewService(a dataexchange.ApplicationRef, h modulehost.Host, s *persistence.Store) *Service {
+func NewService(a dataexchange.ApplicationRef, h modulehost.Host, s dataexchangerepository.JobRepository) *Service {
 	return &Service{application: a, host: h, store: s}
 }
 func (*Service) Descriptor() dataexchange.Descriptor {
@@ -58,19 +59,19 @@ func (b *Service) SubmitExport(ctx context.Context, r dataexchange.ExportRequest
 	return b.store.SubmitExport(ctx, r)
 }
 func (b *Service) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
-	if e := r.Scope.Validate(); e != nil {
+	if e := r.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
 	return b.store.Job(ctx, r)
 }
 func (b *Service) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
-	if e := r.Scope.Validate(); e != nil {
+	if e := r.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
 	return b.store.Cancel(ctx, r)
 }
 func (b *Service) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
-	if e := r.Scope.Validate(); e != nil {
+	if e := r.Validate(); e != nil {
 		return dataexchange.Artifact{}, e
 	}
 	return b.store.Artifact(ctx, r)
@@ -86,18 +87,25 @@ func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 	if c.PollInterval <= 0 {
 		c.PollInterval = 250 * time.Millisecond
 	}
+	if c.BatchSize <= 0 {
+		c.BatchSize = 1
+	}
 	go func() {
 		defer close(done)
 		owner := b.application.RuntimeID + ":" + b.application.ApplicationID
 		t := time.NewTicker(c.PollInterval)
 		defer t.Stop()
 		for {
-			if x, ok, e := b.store.Claim(ctx, owner, c.LeaseTTL); e == nil && ok {
+			for claimed := 0; claimed < c.BatchSize; claimed++ {
+				x, ok, e := b.store.Claim(ctx, owner, c.LeaseTTL)
+				if e != nil || !ok {
+					break
+				}
 				if e = b.processWithHeartbeat(ctx, x, c.LeaseTTL); e != nil {
 					failCtx := b.store.Scoped(context.WithoutCancel(ctx), x.Scope.WorkspaceID, owner)
-					_ = b.store.Fail(failCtx, x, "processing_failed")
+					plan := dataexchangeservice.PlanProcessingFailure(x.Attempts, "processing_failed", time.Now().UTC())
+					_ = b.store.Fail(failCtx, x, plan)
 				}
-				continue
 			}
 			select {
 			case <-ctx.Done():
@@ -109,7 +117,7 @@ func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 	return done
 }
 
-func (b *Service) processWithHeartbeat(parent context.Context, x persistence.WorkItem, ttl time.Duration) error {
+func (b *Service) processWithHeartbeat(parent context.Context, x dataexchangemodel.WorkItem, ttl time.Duration) error {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -148,7 +156,7 @@ func (b *Service) Close(context.Context) error {
 	})
 	return nil
 }
-func (b *Service) Process(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) Process(ctx context.Context, x dataexchangemodel.WorkItem) error {
 	ctx = b.store.Scoped(ctx, x.Scope.WorkspaceID, x.Scope.ActorID)
 	switch x.Job.Operation {
 	case "import":
@@ -160,7 +168,7 @@ func (b *Service) Process(ctx context.Context, x persistence.WorkItem) error {
 	}
 }
 
-func (b *Service) processImport(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) processImport(ctx context.Context, x dataexchangemodel.WorkItem) error {
 	p, ok := b.host.ImportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("import provider unavailable")
@@ -191,7 +199,7 @@ func (b *Service) processImport(ctx context.Context, x persistence.WorkItem) err
 	return b.store.Complete(ctx, x, nil)
 }
 
-func (b *Service) processImportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ImportArtifactProvider) error {
+func (b *Service) processImportArtifact(ctx context.Context, x dataexchangemodel.WorkItem, provider modulehost.ImportArtifactProvider) error {
 	metadata := struct {
 		Filename    string          `json:"filename"`
 		ContentType string          `json:"content_type"`
@@ -233,7 +241,7 @@ func (b *Service) processImportArtifact(ctx context.Context, x persistence.WorkI
 
 type importHandler func(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error)
 
-func (b *Service) readImport(ctx context.Context, x persistence.WorkItem, handle importHandler) (int, int, error) {
+func (b *Service) readImport(ctx context.Context, x dataexchangemodel.WorkItem, handle importHandler) (int, int, error) {
 	source, e := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
 	if e != nil {
 		return 0, 0, e
@@ -243,24 +251,32 @@ func (b *Service) readImport(ctx context.Context, x persistence.WorkItem, handle
 	rejected := 0
 	var headers []string
 	rows := make([]dataexchange.ImportRow, 0, importBatchRows)
-	flush := func() error {
+	flush := func(final bool) error {
 		if len(rows) == 0 {
 			return nil
 		}
 		batchNo++
 		copyRows := append([]dataexchange.ImportRow(nil), rows...)
-		result, err := handle(ctx, dataexchange.ImportBatch{Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.ID, ChunkID: fmt.Sprintf("%s:%d", x.Job.ID, batchNo), Headers: append([]string(nil), headers...), Rows: copyRows})
+		result, err := handle(ctx, dataexchange.ImportBatch{
+			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.ID, ChunkID: fmt.Sprintf("%s:%d", x.Job.ID, batchNo),
+			Attempt: x.Attempts + 1, Final: final, Headers: append([]string(nil), headers...), Rows: copyRows,
+		})
 		rejected += result.Rejected
 		rows = rows[:0]
 		return err
 	}
 	headers, e = dataexchange.DecodeCSV(ctx, source, dataexchange.CSVDecodeLimits{MaxRows: importMaxRows, MaxColumns: importMaxColumns}, func(decodedHeaders []string, record dataexchange.CSVRecord) error {
 		headers = decodedHeaders
+		// Keep one full batch buffered until another row proves it is not the
+		// terminal batch. This lets providers release attempt-scoped state on an
+		// exact batch-size boundary without buffering more than one batch.
+		if len(rows) == importBatchRows {
+			if err := flush(false); err != nil {
+				return err
+			}
+		}
 		total++
 		rows = append(rows, dataexchange.ImportRow{Number: record.Number, Values: record.Values})
-		if len(rows) == importBatchRows {
-			return flush()
-		}
 		return nil
 	})
 	if e != nil {
@@ -269,13 +285,13 @@ func (b *Service) readImport(ctx context.Context, x persistence.WorkItem, handle
 	if len(headers) == 0 {
 		return total, rejected, dataexchange.ErrHeaderRequired
 	}
-	if e = flush(); e != nil {
+	if e = flush(true); e != nil {
 		return total, rejected, e
 	}
 	return total, rejected, nil
 }
 
-func (b *Service) processExport(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) processExport(ctx context.Context, x dataexchangemodel.WorkItem) error {
 	p, ok := b.host.ExportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("export provider unavailable")
@@ -354,7 +370,7 @@ func (b *Service) processExport(ctx context.Context, x persistence.WorkItem) err
 	if e != nil {
 		return e
 	}
-	a := &persistence.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
+	a := &dataexchangemodel.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
 	if finalizer, finalizes := p.(modulehost.ExportCompletionProvider); finalizes {
 		if e = finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
 			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
@@ -367,7 +383,7 @@ func (b *Service) processExport(ctx context.Context, x persistence.WorkItem) err
 	return b.store.Complete(ctx, x, a)
 }
 
-func (b *Service) processExportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
+func (b *Service) processExportArtifact(ctx context.Context, x dataexchangemodel.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
 	artifact, err := artifactProvider.BuildExportArtifact(ctx, dataexchange.ExportArtifactRequest{
 		Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID,
 		Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt,
@@ -443,7 +459,7 @@ func (b *Service) processExportArtifact(ctx context.Context, x persistence.WorkI
 	if err != nil {
 		return err
 	}
-	record := &persistence.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: artifact.Filename, ContentType: artifact.ContentType, SHA256: sha, Size: size, ExpiresAt: artifact.ExpiresAt}
+	record := &dataexchangemodel.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: artifact.Filename, ContentType: artifact.ContentType, SHA256: sha, Size: size, ExpiresAt: artifact.ExpiresAt}
 	if finalizer, finalizes := provider.(modulehost.ExportCompletionProvider); finalizes {
 		if err := finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
 			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,

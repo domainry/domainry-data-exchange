@@ -8,6 +8,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	"github.com/domainry/domainry-foundation/modulehttp"
 )
 
 type remoteTestHost struct{}
@@ -61,5 +62,9 @@ func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 	}
 	if transport.source != source {
 		t.Fatal("Remote Binding replaced or buffered source reader")
+	}
+	provider, ok := binding.(modulehttp.Provider)
+	if !ok || len(provider.HTTPSurfaces()) != 1 {
+		t.Fatal("Data Exchange SaaS binding does not expose the owner HTTP surface")
 	}
 }

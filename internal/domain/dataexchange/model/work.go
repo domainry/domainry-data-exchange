@@ -20,3 +20,10 @@ type ArtifactRecord struct {
 	Size                              int64
 	ExpiresAt                         time.Time
 }
+
+type FailurePlan struct {
+	Status        string
+	Code          string
+	Attempts      int
+	NextAttemptAt time.Time
+}

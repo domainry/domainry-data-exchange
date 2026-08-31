@@ -22,7 +22,7 @@ type JobRepository interface {
 	CommitResultPage(context.Context, model.WorkItem, int, []byte, string, int, int) error
 	Progress(context.Context, model.WorkItem, int, int) error
 	Complete(context.Context, model.WorkItem, *model.ArtifactRecord) error
-	Fail(context.Context, model.WorkItem, string) error
+	Fail(context.Context, model.WorkItem, model.FailurePlan) error
 	Heartbeat(context.Context, model.WorkItem, time.Duration) error
 	Scoped(context.Context, string, string) context.Context
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
+	"github.com/domainry/domainry-foundation/modulehttp"
 	_ "modernc.org/sqlite"
 )
 
@@ -37,6 +39,8 @@ func (m *testMigrations) ApplyOwnedMigrations(ctx context.Context, _ string, ite
 type testImportProvider struct {
 	mu                 sync.Mutex
 	validated, applied int
+	validateAttempts   []int
+	validateFinal      []bool
 	reject             bool
 }
 
@@ -44,6 +48,8 @@ func (p *testImportProvider) ValidateImportBatch(_ context.Context, b dataexchan
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.validated += len(b.Rows)
+	p.validateAttempts = append(p.validateAttempts, b.Attempt)
+	p.validateFinal = append(p.validateFinal, b.Final)
 	if p.reject {
 		return dataexchange.ImportBatchResult{Rejected: len(b.Rows)}, nil
 	}
@@ -265,6 +271,45 @@ func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
 	if p.validated != 2 || p.applied != 2 {
 		t.Fatalf("validated=%d applied=%d", p.validated, p.applied)
 	}
+	if len(p.validateAttempts) != 1 || p.validateAttempts[0] != 1 || len(p.validateFinal) != 1 || !p.validateFinal[0] {
+		t.Fatalf("attempts=%v final=%v", p.validateAttempts, p.validateFinal)
+	}
+}
+
+func TestModuleBindingExposesOwnedHTTPSurface(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	provider, ok := binding.(modulehttp.Provider)
+	if !ok {
+		t.Fatal("Data Exchange Module binding does not expose HTTP surfaces")
+	}
+	surfaces := provider.HTTPSurfaces()
+	if len(surfaces) != 1 {
+		t.Fatalf("surfaces=%d", len(surfaces))
+	}
+	if err := modulehttp.ValidateSurface(surfaces[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerBatchSizeClaimsMultipleJobsPerPoll(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	first, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "batch-size-first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "batch-size-second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Hour, BatchSize: 2})
+	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+	if completed := waitCompleted(t, binding, scope, first.ID); completed.Status != "completed" {
+		t.Fatalf("first=%+v", completed)
+	}
+	if completed := waitCompleted(t, binding, scope, second.ID); completed.Status != "completed" {
+		t.Fatalf("second=%+v", completed)
+	}
 }
 
 func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
@@ -443,6 +488,99 @@ func TestModuleNeverAppliesRejectedImport(t *testing.T) {
 	if p.validated != 3 || p.applied != 0 {
 		t.Fatalf("validated=%d applied=%d; want three bounded attempts and no apply", p.validated, p.applied)
 	}
+}
+
+func TestJobOwnershipConstraintsApplyAtomicallyToQueryAndCancel(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "ownership-constraint",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongOwner := dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "reports", Operation: "export"}
+	if _, err := binding.Job(t.Context(), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("cross-provider query error=%v; want ErrJobNotFound", err)
+	}
+	if _, err := binding.Cancel(t.Context(), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("cross-provider cancel error=%v; want ErrJobNotFound", err)
+	}
+	current, err := binding.Job(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "queued" {
+		t.Fatalf("cross-provider cancel changed status to %q", current.Status)
+	}
+	if _, err := binding.Job(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "import"}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("cross-operation query error=%v; want ErrJobNotFound", err)
+	}
+}
+
+func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
+	completeExport := func(t *testing.T) (dataexchange.Binding, *sql.DB, dataexchange.Scope, string) {
+		t.Helper()
+		binding, _, db := openTestBindingStore(t)
+		scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+		job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+			Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: t.Name(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
+		t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+		if completed := waitCompleted(t, binding, scope, job.ID); completed.Status != "completed" {
+			t.Fatalf("completed=%+v", completed)
+		}
+		return binding, db, scope, job.ID
+	}
+
+	t.Run("expired", func(t *testing.T) {
+		binding, db, scope, jobID := completeExport(t)
+		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), jobID); err != nil {
+			t.Fatal(err)
+		}
+		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer artifact.Content.Close()
+		if _, err := io.ReadAll(artifact.Content); !errors.Is(err, dataexchange.ErrArtifactExpired) {
+			t.Fatalf("expired artifact read error=%v", err)
+		}
+	})
+
+	t.Run("chunk sha", func(t *testing.T) {
+		binding, db, scope, jobID := completeExport(t)
+		if _, err := db.Exec(`UPDATE _data_exchange_job_chunks SET content_sha256='bad' WHERE job_id=? AND direction='result'`, jobID); err != nil {
+			t.Fatal(err)
+		}
+		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer artifact.Content.Close()
+		if _, err := io.ReadAll(artifact.Content); !errors.Is(err, dataexchange.ErrContentCorrupt) {
+			t.Fatalf("corrupt chunk error=%v", err)
+		}
+	})
+
+	t.Run("artifact identity", func(t *testing.T) {
+		binding, db, scope, jobID := completeExport(t)
+		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET size_bytes=size_bytes+1 WHERE job_id=?`, jobID); err != nil {
+			t.Fatal(err)
+		}
+		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer artifact.Content.Close()
+		if _, err := io.ReadAll(artifact.Content); !errors.Is(err, dataexchange.ErrContentCorrupt) {
+			t.Fatalf("artifact identity error=%v", err)
+		}
+	})
 }
 
 func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {

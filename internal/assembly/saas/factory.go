@@ -8,6 +8,8 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	"github.com/domainry/domainry-data-exchange-sdk/saashost"
+	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
+	"github.com/domainry/domainry-foundation/modulehttp"
 )
 
 type Factory struct{ transport saashost.Transport }
@@ -33,17 +35,28 @@ func (f Factory) OpenSaaS(ctx context.Context, app dataexchange.ApplicationRef, 
 	if err := f.transport.Connect(ctx, app, host); err != nil {
 		return nil, fmt.Errorf("connect Data Exchange SaaS provider bridge: %w", err)
 	}
-	return &binding{application: app, transport: f.transport, descriptor: descriptor}, nil
+	result := &binding{application: app, transport: f.transport, descriptor: descriptor}
+	surface, err := modulehttptransport.NewSurface(result, host)
+	if err != nil {
+		_ = f.transport.Close(context.WithoutCancel(ctx), app)
+		return nil, err
+	}
+	result.surfaces = []modulehttp.Surface{surface}
+	return result, nil
 }
 
 type binding struct {
 	application dataexchange.ApplicationRef
 	transport   saashost.Transport
 	descriptor  dataexchange.Descriptor
+	surfaces    []modulehttp.Surface
 	closeOnce   sync.Once
 }
 
 func (b *binding) Descriptor() dataexchange.Descriptor { return b.descriptor }
+func (b *binding) HTTPSurfaces() []modulehttp.Surface {
+	return append([]modulehttp.Surface(nil), b.surfaces...)
+}
 func (b *binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	return b.transport.SubmitImport(ctx, b.application, r)
 }
@@ -71,5 +84,6 @@ func (b *binding) Close(ctx context.Context) error {
 }
 
 var _ dataexchange.Binding = (*binding)(nil)
+var _ modulehttp.Provider = (*binding)(nil)
 var _ dataexchange.Factory = Factory{}
 var _ saashost.Factory = Factory{}

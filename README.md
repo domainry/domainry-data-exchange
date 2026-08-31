@@ -13,6 +13,15 @@ does not import implementation packages or maintain a second file engine.
 
 Both deployments expose the same `dataexchange.Binding`. Runtime composition selects a Factory; HTTP and Record application code do not branch on deployment mode.
 
+Both bindings also expose the Data Exchange-owned `modulehttp.Surface` for
+`GET /data-exchange/jobs/{jobID}` and
+`POST /data-exchange/jobs/{jobID}/cancel`, plus
+`GET /data-exchange/jobs/{jobID}/download`. The host authenticates the request;
+Data Exchange derives workspace/actor scope from that authenticated principal
+and never serializes raw provider options, lease state, or fencing tokens. An
+optional provider-owned projector can preserve an existing public Record or
+Report job response without moving domain payload decoding into Data Exchange.
+
 ## Durable invariants
 
 - Uploads are read incrementally into bounded chunks; the complete file is never required in one memory buffer.
@@ -45,8 +54,10 @@ module while preserving the existing Data Exchange deployment contract:
 - `internal/infrastructure/persistence/database/{dataexchange,schema}` owns DML
   and migration definitions; concrete dialect profiles remain under
   `sqlite`, `mysql`, and `postgres`.
-- `internal/transport/http/{module,saas}` reserves transport ownership without
-  coupling domain or application packages to HTTP.
+- `internal/transport/http/module` owns the deployment-neutral product Job HTTP
+  Surface used by both Module and the thin SaaS binding wrapper;
+  `internal/transport/http/saas` remains reserved for the standalone remote
+  server protocol.
 
 There is no placeholder `cmd/data-exchange-server`: the current SaaS SDK
 contract is a client transport contract. A standalone process should be added

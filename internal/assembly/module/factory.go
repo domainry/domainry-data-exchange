@@ -10,6 +10,8 @@ import (
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
+	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
+	"github.com/domainry/domainry-foundation/modulehttp"
 )
 
 type Options struct{}
@@ -44,7 +46,13 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	return dataexchangesdkadapter.NewBinding(application, host, store), nil
+	binding := dataexchangesdkadapter.NewBinding(application, host, store)
+	surface, err := modulehttptransport.NewSurface(binding, host)
+	if err != nil {
+		return nil, err
+	}
+	binding.SetHTTPSurfaces([]modulehttp.Surface{surface})
+	return binding, nil
 }
 
 var _ dataexchange.Factory = (*Factory)(nil)

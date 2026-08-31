@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strings"
 	"time"
@@ -21,8 +22,6 @@ import (
 )
 
 const sourceChunkBytes = 1 << 20
-const maxProcessingAttempts = 3
-const retryInitialDelay = time.Second
 
 type Store struct {
 	db               *sql.DB
@@ -278,18 +277,20 @@ func (s *Store) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, 
 }
 func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(query.And(
-		query.Equal("id", r.JobID), query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("actor_id", r.Scope.ActorID),
-	)).Build()
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(jobAccessPredicate(r)).Build()
 	if err != nil {
 		return dataexchange.Job{}, err
 	}
-	return scanJob(s.db.QueryRowContext(ctx, queryValue, args...))
+	job, err := scanJob(s.db.QueryRowContext(ctx, queryValue, args...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return dataexchange.Job{}, dataexchange.ErrJobNotFound
+	}
+	return job, err
 }
 func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(query.And(
-		query.Equal("id", r.JobID), query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("actor_id", r.Scope.ActorID), query.In("status", "queued", "running"),
+		jobAccessPredicate(r), query.In("status", "queued", "running"),
 	))
 	if _, e := execute(ctx, s.db, update); e != nil {
 		return dataexchange.Job{}, e
@@ -297,43 +298,71 @@ func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexch
 	return s.Job(ctx, r)
 }
 
-type WorkItem = dataexchangemodel.WorkItem
+func jobAccessPredicate(r dataexchange.JobRequest) query.Predicate {
+	predicates := []query.Predicate{
+		query.Equal("id", strings.TrimSpace(r.JobID)),
+		query.Equal("workspace_id", strings.TrimSpace(r.Scope.WorkspaceID)),
+		query.Equal("actor_id", strings.TrimSpace(r.Scope.ActorID)),
+	}
+	if provider := strings.TrimSpace(r.Provider); provider != "" {
+		predicates = append(predicates, query.Equal("provider", provider))
+	}
+	if operation := strings.TrimSpace(r.Operation); operation != "" {
+		predicates = append(predicates, query.Equal("operation", operation))
+	}
+	return query.And(predicates...)
+}
 
-func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (WorkItem, bool, error) {
+func qualifiedJobAccessPredicate(alias string, r dataexchange.JobRequest) query.Predicate {
+	predicates := []query.Predicate{
+		query.EqualValue(query.QualifiedColumn(alias, "id"), strings.TrimSpace(r.JobID)),
+		query.EqualValue(query.QualifiedColumn(alias, "workspace_id"), strings.TrimSpace(r.Scope.WorkspaceID)),
+		query.EqualValue(query.QualifiedColumn(alias, "actor_id"), strings.TrimSpace(r.Scope.ActorID)),
+	}
+	if provider := strings.TrimSpace(r.Provider); provider != "" {
+		predicates = append(predicates, query.EqualValue(query.QualifiedColumn(alias, "provider"), provider))
+	}
+	if operation := strings.TrimSpace(r.Operation); operation != "" {
+		predicates = append(predicates, query.EqualValue(query.QualifiedColumn(alias, "operation"), operation))
+	}
+	return query.And(predicates...)
+}
+
+func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
 	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_queue_scopes").Columns("scope_key").OrderBy(query.Ascending("updated_at"), query.Ascending("scope_key")).Build()
 	if err != nil {
-		return WorkItem{}, false, err
+		return dataexchangemodel.WorkItem{}, false, err
 	}
 	rows, err := s.db.QueryContext(ctx, queryValue, args...)
 	if err != nil {
-		return WorkItem{}, false, err
+		return dataexchangemodel.WorkItem{}, false, err
 	}
 	workspaces := make([]string, 0)
 	for rows.Next() {
 		var workspace string
 		if err = rows.Scan(&workspace); err != nil {
 			_ = rows.Close()
-			return WorkItem{}, false, err
+			return dataexchangemodel.WorkItem{}, false, err
 		}
 		workspaces = append(workspaces, workspace)
 	}
 	if err = rows.Close(); err != nil {
-		return WorkItem{}, false, err
+		return dataexchangemodel.WorkItem{}, false, err
 	}
 	for _, workspace := range workspaces {
 		item, found, claimErr := s.claimWorkspace(s.Scoped(ctx, workspace, owner), workspace, owner, ttl)
 		if claimErr != nil {
-			return WorkItem{}, false, claimErr
+			return dataexchangemodel.WorkItem{}, false, claimErr
 		}
 		if found {
 			return item, true, nil
 		}
 	}
-	return WorkItem{}, false, nil
+	return dataexchangemodel.WorkItem{}, false, nil
 }
 
-func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl time.Duration) (WorkItem, bool, error) {
-	var x WorkItem
+func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
+	var x dataexchangemodel.WorkItem
 	var created, updated string
 	now := time.Now().UTC()
 	readyQueued := query.And(query.Equal("status", "queued"), query.Or(
@@ -356,6 +385,8 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	if err != nil {
 		return x, false, err
 	}
+	x.Job.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	x.Job.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -385,8 +416,14 @@ func streamRows(rows *sql.Rows) (io.ReadCloser, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var b []byte
-			if e := rows.Scan(&b); e != nil {
+			var expectedSHA string
+			if e := rows.Scan(&b, &expectedSHA); e != nil {
 				_ = pw.CloseWithError(e)
+				return
+			}
+			digest := sha256.Sum256(b)
+			if !strings.EqualFold(hex.EncodeToString(digest[:]), strings.TrimSpace(expectedSHA)) {
+				_ = pw.CloseWithError(fmt.Errorf("%w: chunk SHA-256 mismatch", dataexchange.ErrContentCorrupt))
 				return
 			}
 			if _, e := pw.Write(b); e != nil {
@@ -399,7 +436,7 @@ func streamRows(rows *sql.Rows) (io.ReadCloser, error) {
 }
 func (s *Store) Chunks(ctx context.Context, workspace, job, direction string) (io.ReadCloser, error) {
 	ctx = s.Scoped(ctx, workspace, "data-exchange-worker")
-	queryValue, args, e := query.NewSelectBuilder(s.renderer, "_data_exchange_job_chunks").Columns("content").Where(query.And(
+	queryValue, args, e := query.NewSelectBuilder(s.renderer, "_data_exchange_job_chunks").Columns("content", "content_sha256").Where(query.And(
 		query.Equal("workspace_id", workspace), query.Equal("job_id", job), query.Equal("direction", direction),
 	)).OrderBy(query.Ascending("sequence_no")).Build()
 	if e != nil {
@@ -424,7 +461,7 @@ func (s *Store) ResultIdentity(ctx context.Context, workspace, job string) (stri
 	}
 	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
-func (s *Store) CommitResultPage(ctx context.Context, x WorkItem, seq int, content []byte, nextCursor string, checkpoint, total int) error {
+func (s *Store) CommitResultPage(ctx context.Context, x dataexchangemodel.WorkItem, seq int, content []byte, nextCursor string, checkpoint, total int) error {
 	ctx = s.Scoped(ctx, x.Scope.WorkspaceID, "data-exchange-worker")
 	d := sha256.Sum256(content)
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -451,7 +488,7 @@ func (s *Store) CommitResultPage(ctx context.Context, x WorkItem, seq int, conte
 	}
 	return tx.Commit()
 }
-func (s *Store) Progress(ctx context.Context, x WorkItem, checkpoint, total int) error {
+func (s *Store) Progress(ctx context.Context, x dataexchangemodel.WorkItem, checkpoint, total int) error {
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("checkpoint_value", checkpoint).Set("total_value", total).
 		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, e := execute(ctx, s.db, update)
@@ -465,13 +502,11 @@ func (s *Store) Progress(ctx context.Context, x WorkItem, checkpoint, total int)
 	return nil
 }
 
-func fencedJob(x WorkItem) query.Predicate {
+func fencedJob(x dataexchangemodel.WorkItem) query.Predicate {
 	return query.And(query.Equal("id", x.Job.ID), query.Equal("status", "running"), query.Equal("lease_owner", x.Job.LeaseOwner), query.Equal("fencing_token", x.Job.FencingToken))
 }
 
-type ArtifactRecord = dataexchangemodel.ArtifactRecord
-
-func (s *Store) Complete(ctx context.Context, x WorkItem, a *ArtifactRecord) error {
+func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *dataexchangemodel.ArtifactRecord) error {
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -499,17 +534,14 @@ func (s *Store) Complete(ctx context.Context, x WorkItem, a *ArtifactRecord) err
 	}
 	return tx.Commit()
 }
-func (s *Store) Fail(ctx context.Context, x WorkItem, code string) error {
+func (s *Store) Fail(ctx context.Context, x dataexchangemodel.WorkItem, plan dataexchangemodel.FailurePlan) error {
 	now := time.Now().UTC()
-	attempts := x.Attempts + 1
-	status, next := "failed", ""
-	if attempts < maxProcessingAttempts {
-		status = "queued"
-		delay := retryInitialDelay * time.Duration(1<<x.Attempts)
-		next = now.Add(delay).Format(time.RFC3339Nano)
+	next := ""
+	if !plan.NextAttemptAt.IsZero() {
+		next = plan.NextAttemptAt.UTC().Format(time.RFC3339Nano)
 	}
-	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", status).Set("error_code", code).
-		Set("attempt_count", attempts).Set("next_attempt_at", next).Set("lease_owner", "").Set("lease_expires_at", "").
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", plan.Status).Set("error_code", plan.Code).
+		Set("attempt_count", plan.Attempts).Set("next_attempt_at", next).Set("lease_owner", "").Set("lease_expires_at", "").
 		Set("updated_at", now.Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, err := execute(ctx, s.db, update)
 	if err != nil {
@@ -522,7 +554,7 @@ func (s *Store) Fail(ctx context.Context, x WorkItem, code string) error {
 	return nil
 }
 
-func (s *Store) Heartbeat(ctx context.Context, x WorkItem, ttl time.Duration) error {
+func (s *Store) Heartbeat(ctx context.Context, x dataexchangemodel.WorkItem, ttl time.Duration) error {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -548,20 +580,73 @@ func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest) (dataex
 		query.Project(query.QualifiedColumn("a", "content_type")), query.Project(query.QualifiedColumn("a", "content_sha256")),
 		query.Project(query.QualifiedColumn("a", "size_bytes")), query.Project(query.QualifiedColumn("a", "expires_at")),
 	).Join(query.InnerJoin("_data_exchange_jobs", "j", query.EqualExpressions(query.QualifiedColumn("j", "id"), query.QualifiedColumn("a", "job_id")))).Where(query.And(
-		query.EqualValue(query.QualifiedColumn("j", "id"), r.JobID), query.EqualValue(query.QualifiedColumn("j", "workspace_id"), r.Scope.WorkspaceID),
-		query.EqualValue(query.QualifiedColumn("j", "actor_id"), r.Scope.ActorID), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
+		qualifiedJobAccessPredicate("j", r), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
 	)).Build()
 	if buildErr != nil {
 		return a, buildErr
 	}
 	if e := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size, &expiresAt); e != nil {
+		if errors.Is(e, sql.ErrNoRows) {
+			return a, dataexchange.ErrJobNotFound
+		}
 		return a, e
 	}
-	a.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiresAt)
+	var e error
+	a.ExpiresAt, e = time.Parse(time.RFC3339Nano, expiresAt)
+	if e != nil || a.Size < 0 || strings.TrimSpace(a.SHA256) == "" {
+		return dataexchange.Artifact{}, fmt.Errorf("%w: artifact metadata is invalid", dataexchange.ErrContentCorrupt)
+	}
+	if !time.Now().UTC().Before(a.ExpiresAt) {
+		a.Content = errorReadCloser{err: dataexchange.ErrArtifactExpired}
+		return a, nil
+	}
 	content, e := s.Chunks(ctx, r.Scope.WorkspaceID, r.JobID, "result")
 	if e != nil {
 		return a, e
 	}
-	a.Content = content
+	a.Content = &verifyingReadCloser{source: content, digest: sha256.New(), expectedSHA: strings.ToLower(strings.TrimSpace(a.SHA256)), expectedSize: a.Size}
 	return a, nil
+}
+
+type errorReadCloser struct{ err error }
+
+func (r errorReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (errorReadCloser) Close() error               { return nil }
+
+type verifyingReadCloser struct {
+	source       io.ReadCloser
+	digest       hash.Hash
+	expectedSHA  string
+	expectedSize int64
+	read         int64
+	verified     bool
+}
+
+func (r *verifyingReadCloser) Read(buffer []byte) (int, error) {
+	if r == nil || r.source == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, err := r.source.Read(buffer)
+	if n > 0 {
+		r.read += int64(n)
+		_, _ = r.digest.Write(buffer[:n])
+	}
+	if r.read > r.expectedSize {
+		return n, fmt.Errorf("%w: artifact size exceeds %d bytes", dataexchange.ErrContentCorrupt, r.expectedSize)
+	}
+	if err == io.EOF && !r.verified {
+		r.verified = true
+		actualSHA := hex.EncodeToString(r.digest.Sum(nil))
+		if r.read != r.expectedSize || !strings.EqualFold(actualSHA, r.expectedSHA) {
+			return n, fmt.Errorf("%w: artifact identity mismatch", dataexchange.ErrContentCorrupt)
+		}
+	}
+	return n, err
+}
+
+func (r *verifyingReadCloser) Close() error {
+	if r == nil || r.source == nil {
+		return nil
+	}
+	return r.source.Close()
 }

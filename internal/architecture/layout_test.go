@@ -28,7 +28,7 @@ func TestLayerDependenciesPointInward(t *testing.T) {
 	set := token.NewFileSet()
 	checks := map[string][]string{
 		"../domain/":         {"/internal/application/", "/internal/adapter/", "/internal/assembly/", "/internal/infrastructure/", "/internal/transport/"},
-		"../application/":    {"/internal/adapter/", "/internal/assembly/", "/internal/transport/"},
+		"../application/":    {"/internal/adapter/", "/internal/assembly/", "/internal/infrastructure/", "/internal/transport/"},
 		"../infrastructure/": {"/internal/application/", "/internal/adapter/", "/internal/assembly/", "/internal/transport/"},
 	}
 	for root, forbidden := range checks {
