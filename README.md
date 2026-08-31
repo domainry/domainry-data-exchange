@@ -29,3 +29,25 @@ Both deployments expose the same `dataexchange.Binding`. Runtime composition sel
 - Artifact downloads stream ordered result chunks.
 
 White-label presentation is intentionally outside this module.
+
+## Repository architecture
+
+The implementation follows the same inward dependency direction as the Party
+module while preserving the existing Data Exchange deployment contract:
+
+- `internal/domain/dataexchange` owns durable worker state, request policies,
+  and repository ports.
+- `internal/application/dataexchange` owns import/export orchestration and the
+  durable worker lifecycle.
+- `internal/adapter/dataexchangesdk` is the SDK-facing binding adapter.
+- `internal/assembly/module` and `internal/assembly/saas` compose the two
+  deployments. Public `module` and `remote` packages are compatibility facades.
+- `internal/infrastructure/persistence/database/{dataexchange,schema}` owns DML
+  and migration definitions; concrete dialect profiles remain under
+  `sqlite`, `mysql`, and `postgres`.
+- `internal/transport/http/{module,saas}` reserves transport ownership without
+  coupling domain or application packages to HTTP.
+
+There is no placeholder `cmd/data-exchange-server`: the current SaaS SDK
+contract is a client transport contract. A standalone process should be added
+only together with a real server-side transport/host contract.

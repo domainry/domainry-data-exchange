@@ -1,4 +1,4 @@
-package exchange
+package dataexchangeapplication
 
 import (
 	"bufio"
@@ -16,7 +16,8 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
+	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 )
 
 const importBatchRows = 500
@@ -24,7 +25,7 @@ const importMaxRows = 1_000_000
 const importMaxColumns = 512
 const exportPageMaxBytes = 16 << 20
 
-type Binding struct {
+type Service struct {
 	application dataexchange.ApplicationRef
 	host        modulehost.Host
 	store       *persistence.Store
@@ -32,55 +33,49 @@ type Binding struct {
 	cancel      context.CancelFunc
 }
 
-func NewBinding(a dataexchange.ApplicationRef, h modulehost.Host, s *persistence.Store) *Binding {
-	return &Binding{application: a, host: h, store: s}
+func NewService(a dataexchange.ApplicationRef, h modulehost.Host, s *persistence.Store) *Service {
+	return &Service{application: a, host: h, store: s}
 }
-func (*Binding) Descriptor() dataexchange.Descriptor {
+func (*Service) Descriptor() dataexchange.Descriptor {
 	return dataexchange.Descriptor{ProtocolVersion: dataexchange.ProtocolVersionV1, Mode: dataexchange.DeploymentModeModule, Capabilities: []string{"streaming_import", "paged_export", "durable_chunks", "artifact_lifecycle"}}
 }
-func (b *Binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
-	if e := r.Scope.Validate(); e != nil {
+func (b *Service) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
+	if e := dataexchangeservice.ValidateImportRequest(r); e != nil {
 		return dataexchange.Job{}, false, e
-	}
-	if r.Source == nil || strings.TrimSpace(r.Provider) == "" || strings.TrimSpace(r.ObjectKey) == "" || strings.TrimSpace(r.IdempotencyKey) == "" {
-		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange import request is incomplete")
 	}
 	if _, ok := b.host.ImportProvider(r.Provider); !ok {
 		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange import provider %q is unavailable", r.Provider)
 	}
 	return b.store.SubmitImport(ctx, r)
 }
-func (b *Binding) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
-	if e := r.Scope.Validate(); e != nil {
+func (b *Service) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
+	if e := dataexchangeservice.ValidateExportRequest(r); e != nil {
 		return dataexchange.Job{}, false, e
-	}
-	if strings.TrimSpace(r.Provider) == "" || strings.TrimSpace(r.ObjectKey) == "" || strings.TrimSpace(r.IdempotencyKey) == "" {
-		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange export request is incomplete")
 	}
 	if _, ok := b.host.ExportProvider(r.Provider); !ok {
 		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange export provider %q is unavailable", r.Provider)
 	}
 	return b.store.SubmitExport(ctx, r)
 }
-func (b *Binding) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (b *Service) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
 	return b.store.Job(ctx, r)
 }
-func (b *Binding) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (b *Service) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
 	return b.store.Cancel(ctx, r)
 }
-func (b *Binding) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
+func (b *Service) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
 	if e := r.Scope.Validate(); e != nil {
 		return dataexchange.Artifact{}, e
 	}
 	return b.store.Artifact(ctx, r)
 }
-func (b *Binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-chan struct{} {
+func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-chan struct{} {
 	done := make(chan struct{})
 	if !c.Enabled {
 		close(done)
@@ -114,7 +109,7 @@ func (b *Binding) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 	return done
 }
 
-func (b *Binding) processWithHeartbeat(parent context.Context, x persistence.WorkItem, ttl time.Duration) error {
+func (b *Service) processWithHeartbeat(parent context.Context, x persistence.WorkItem, ttl time.Duration) error {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
@@ -145,7 +140,7 @@ func (b *Binding) processWithHeartbeat(parent context.Context, x persistence.Wor
 	<-done
 	return err
 }
-func (b *Binding) Close(context.Context) error {
+func (b *Service) Close(context.Context) error {
 	b.closeOnce.Do(func() {
 		if b.cancel != nil {
 			b.cancel()
@@ -153,7 +148,7 @@ func (b *Binding) Close(context.Context) error {
 	})
 	return nil
 }
-func (b *Binding) Process(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) Process(ctx context.Context, x persistence.WorkItem) error {
 	ctx = b.store.Scoped(ctx, x.Scope.WorkspaceID, x.Scope.ActorID)
 	switch x.Job.Operation {
 	case "import":
@@ -165,7 +160,7 @@ func (b *Binding) Process(ctx context.Context, x persistence.WorkItem) error {
 	}
 }
 
-func (b *Binding) processImport(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) processImport(ctx context.Context, x persistence.WorkItem) error {
 	p, ok := b.host.ImportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("import provider unavailable")
@@ -196,7 +191,7 @@ func (b *Binding) processImport(ctx context.Context, x persistence.WorkItem) err
 	return b.store.Complete(ctx, x, nil)
 }
 
-func (b *Binding) processImportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ImportArtifactProvider) error {
+func (b *Service) processImportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ImportArtifactProvider) error {
 	metadata := struct {
 		Filename    string          `json:"filename"`
 		ContentType string          `json:"content_type"`
@@ -238,7 +233,7 @@ func (b *Binding) processImportArtifact(ctx context.Context, x persistence.WorkI
 
 type importHandler func(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error)
 
-func (b *Binding) readImport(ctx context.Context, x persistence.WorkItem, handle importHandler) (int, int, error) {
+func (b *Service) readImport(ctx context.Context, x persistence.WorkItem, handle importHandler) (int, int, error) {
 	source, e := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
 	if e != nil {
 		return 0, 0, e
@@ -280,7 +275,7 @@ func (b *Binding) readImport(ctx context.Context, x persistence.WorkItem, handle
 	return total, rejected, nil
 }
 
-func (b *Binding) processExport(ctx context.Context, x persistence.WorkItem) error {
+func (b *Service) processExport(ctx context.Context, x persistence.WorkItem) error {
 	p, ok := b.host.ExportProvider(x.Job.Provider)
 	if !ok {
 		return fmt.Errorf("export provider unavailable")
@@ -372,7 +367,7 @@ func (b *Binding) processExport(ctx context.Context, x persistence.WorkItem) err
 	return b.store.Complete(ctx, x, a)
 }
 
-func (b *Binding) processExportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
+func (b *Service) processExportArtifact(ctx context.Context, x persistence.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
 	artifact, err := artifactProvider.BuildExportArtifact(ctx, dataexchange.ExportArtifactRequest{
 		Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID,
 		Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt,
@@ -461,4 +456,4 @@ func (b *Binding) processExportArtifact(ctx context.Context, x persistence.WorkI
 	return b.store.Complete(ctx, x, record)
 }
 
-var _ dataexchange.Binding = (*Binding)(nil)
+var _ dataexchange.Binding = (*Service)(nil)

@@ -10,9 +10,48 @@ import (
 )
 
 func TestRequiredDeploymentPackagesExist(t *testing.T) {
-	for _, path := range []string{"../../module", "../../remote"} {
+	for _, path := range []string{
+		"../../module", "../../remote",
+		"../application/dataexchange", "../domain/dataexchange/model", "../domain/dataexchange/repository", "../domain/dataexchange/service",
+		"../assembly/module", "../assembly/saas", "../adapter/dataexchangesdk",
+		"../transport/http/module", "../transport/http/saas",
+		"../infrastructure/persistence/database/dataexchange", "../infrastructure/persistence/database/schema",
+		"../infrastructure/persistence/sqlite", "../infrastructure/persistence/mysql", "../infrastructure/persistence/postgres",
+	} {
 		if info, err := os.Stat(path); err != nil || !info.IsDir() {
 			t.Fatalf("required package %s is missing", path)
+		}
+	}
+}
+
+func TestLayerDependenciesPointInward(t *testing.T) {
+	set := token.NewFileSet()
+	checks := map[string][]string{
+		"../domain/":         {"/internal/application/", "/internal/adapter/", "/internal/assembly/", "/internal/infrastructure/", "/internal/transport/"},
+		"../application/":    {"/internal/adapter/", "/internal/assembly/", "/internal/transport/"},
+		"../infrastructure/": {"/internal/application/", "/internal/adapter/", "/internal/assembly/", "/internal/transport/"},
+	}
+	for root, forbidden := range checks {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			file, parseErr := parser.ParseFile(set, path, nil, parser.ImportsOnly)
+			if parseErr != nil {
+				return parseErr
+			}
+			for _, spec := range file.Imports {
+				value := strings.Trim(spec.Path.Value, `"`)
+				for _, segment := range forbidden {
+					if strings.Contains(value, segment) {
+						t.Errorf("%s imports outer layer %s", path, value)
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }

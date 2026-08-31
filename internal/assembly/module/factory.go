@@ -1,4 +1,4 @@
-package module
+package moduleassembly
 
 import (
 	"context"
@@ -6,9 +6,10 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	"github.com/domainry/domainry-data-exchange/internal/application/exchange"
+	dataexchangesdkadapter "github.com/domainry/domainry-data-exchange/internal/adapter/dataexchangesdk"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
-	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
+	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 )
 
 type Options struct{}
@@ -32,7 +33,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	migrations, err := persistence.SchemaMigrations(engine, host.Migrations().Schema())
+	migrations, err := persistenceschema.SchemaMigrations(engine, host.Migrations().Schema())
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	return exchange.NewBinding(application, host, store), nil
+	return dataexchangesdkadapter.NewBinding(application, host, store), nil
 }
 
 var _ dataexchange.Factory = (*Factory)(nil)

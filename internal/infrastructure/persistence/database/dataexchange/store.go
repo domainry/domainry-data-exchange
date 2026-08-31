@@ -1,4 +1,4 @@
-package database
+package dataexchange
 
 import (
 	"context"
@@ -13,9 +13,11 @@ import (
 	"time"
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
+	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
+	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
-	ormbuilder "github.com/domainry/domainry-orm/query"
+	"github.com/domainry/domainry-orm/query"
 )
 
 const sourceChunkBytes = 1 << 20
@@ -28,6 +30,8 @@ type Store struct {
 	renderer         ormdialect.Renderer
 	workspaceContext func(context.Context, string, string) context.Context
 }
+
+var _ dataexchangerepository.JobRepository = (*Store)(nil)
 
 func NewStore(db *sql.DB, engine persistenceengine.Engine, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
 	if engine == nil {
@@ -63,18 +67,18 @@ type statementBuilder interface {
 }
 
 func execute(ctx context.Context, executor sqlExecer, statement statementBuilder) (sql.Result, error) {
-	query, args, err := statement.Build()
+	queryValue, args, err := statement.Build()
 	if err != nil {
 		return nil, err
 	}
-	return executor.ExecContext(ctx, query, args...)
+	return executor.ExecContext(ctx, queryValue, args...)
 }
 
 func (s *Store) registerScope(ctx context.Context, executor sqlExecer, workspace string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	insert := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_queue_scopes").
+	insert := query.NewInsertBuilder(s.renderer, "_data_exchange_queue_scopes").
 		Columns("scope_key", "updated_at").Values(workspace, now)
-	insert, err := s.engine.ApplyUpsert(insert, []string{"scope_key"}, ormbuilder.Assign("updated_at", now))
+	insert, err := s.engine.ApplyUpsert(insert, []string{"scope_key"}, query.Assign("updated_at", now))
 	if err != nil {
 		return err
 	}
@@ -116,7 +120,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 			part := append([]byte(nil), buf[:n]...)
 			_, _ = h.Write(part)
 			digest := sha256.Sum256(part)
-			insert := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
+			insert := query.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
 				Columns("workspace_id", "job_id", "direction", "sequence_no", "content", "content_sha256", "created_at").
 				Values(r.Scope.WorkspaceID, stagingID, "source", chunks, part, hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano))
 			if _, err = execute(ctx, tx, insert); err != nil {
@@ -138,9 +142,9 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	}
 	requestHash := fingerprint([]byte(r.Provider), []byte(r.ObjectKey), payload, []byte(sourceHash))
 	var existingHash string
-	lookup, lookupArgs, buildErr := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(ormbuilder.And(
-		ormbuilder.Equal("workspace_id", r.Scope.WorkspaceID), ormbuilder.Equal("provider", r.Provider), ormbuilder.Equal("operation", "import"),
-		ormbuilder.Equal("object_key", r.ObjectKey), ormbuilder.Equal("idempotency_key", r.IdempotencyKey),
+	lookup, lookupArgs, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(query.And(
+		query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("provider", r.Provider), query.Equal("operation", "import"),
+		query.Equal("object_key", r.ObjectKey), query.Equal("idempotency_key", r.IdempotencyKey),
 	)).Build()
 	if buildErr != nil {
 		return dataexchange.Job{}, false, buildErr
@@ -161,7 +165,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 		return dataexchange.Job{}, false, lookupErr
 	}
 	now := time.Now().UTC()
-	insertJob := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
+	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "source_sha256", "source_bytes", "source_chunks", "actor_id", "role_key", "created_at", "updated_at").
 		Values(id, r.Scope.WorkspaceID, r.Provider, "import", r.ObjectKey, r.IdempotencyKey, requestHash, payload, "queued", sourceHash, total, chunks, r.Scope.ActorID, r.Scope.RoleKey, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if _, err = execute(ctx, tx, insertJob); err != nil {
@@ -175,8 +179,8 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 		}
 		return dataexchange.Job{}, false, err
 	}
-	move := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_job_chunks").Set("job_id", id).Where(ormbuilder.And(
-		ormbuilder.Equal("workspace_id", r.Scope.WorkspaceID), ormbuilder.Equal("job_id", stagingID), ormbuilder.Equal("direction", "source"),
+	move := query.NewUpdateBuilder(s.renderer, "_data_exchange_job_chunks").Set("job_id", id).Where(query.And(
+		query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("job_id", stagingID), query.Equal("direction", "source"),
 	))
 	if _, err = execute(ctx, tx, move); err != nil {
 		return dataexchange.Job{}, false, err
@@ -192,11 +196,11 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 
 func (s *Store) requestHash(ctx context.Context, id string) (string, error) {
 	var value string
-	query, args, err := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(ormbuilder.Equal("id", id)).Build()
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(query.Equal("id", id)).Build()
 	if err != nil {
 		return "", err
 	}
-	err = s.db.QueryRowContext(ctx, query, args...).Scan(&value)
+	err = s.db.QueryRowContext(ctx, queryValue, args...).Scan(&value)
 	return value, err
 }
 
@@ -214,7 +218,7 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 		return dataexchange.Job{}, false, beginErr
 	}
 	defer tx.Rollback()
-	insertJob := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
+	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "actor_id", "role_key", "reference_id", "created_at", "updated_at").
 		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	_, err := execute(ctx, tx, insertJob)
@@ -262,30 +266,30 @@ func scanJob(row scanner) (dataexchange.Job, error) {
 	return j, nil
 }
 func (s *Store) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, provider, operation, objectKey, key string) (dataexchange.Job, bool) {
-	query, args, err := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(ormbuilder.And(
-		ormbuilder.Equal("workspace_id", scope.WorkspaceID), ormbuilder.Equal("provider", provider), ormbuilder.Equal("operation", operation),
-		ormbuilder.Equal("object_key", objectKey), ormbuilder.Equal("idempotency_key", key),
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(query.And(
+		query.Equal("workspace_id", scope.WorkspaceID), query.Equal("provider", provider), query.Equal("operation", operation),
+		query.Equal("object_key", objectKey), query.Equal("idempotency_key", key),
 	)).Build()
 	if err != nil {
 		return dataexchange.Job{}, false
 	}
-	j, e := scanJob(s.db.QueryRowContext(ctx, query, args...))
+	j, e := scanJob(s.db.QueryRowContext(ctx, queryValue, args...))
 	return j, e == nil
 }
 func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	query, args, err := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(ormbuilder.And(
-		ormbuilder.Equal("id", r.JobID), ormbuilder.Equal("workspace_id", r.Scope.WorkspaceID), ormbuilder.Equal("actor_id", r.Scope.ActorID),
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(query.And(
+		query.Equal("id", r.JobID), query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("actor_id", r.Scope.ActorID),
 	)).Build()
 	if err != nil {
 		return dataexchange.Job{}, err
 	}
-	return scanJob(s.db.QueryRowContext(ctx, query, args...))
+	return scanJob(s.db.QueryRowContext(ctx, queryValue, args...))
 }
 func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(ormbuilder.And(
-		ormbuilder.Equal("id", r.JobID), ormbuilder.Equal("workspace_id", r.Scope.WorkspaceID), ormbuilder.Equal("actor_id", r.Scope.ActorID), ormbuilder.In("status", "queued", "running"),
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(query.And(
+		query.Equal("id", r.JobID), query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("actor_id", r.Scope.ActorID), query.In("status", "queued", "running"),
 	))
 	if _, e := execute(ctx, s.db, update); e != nil {
 		return dataexchange.Job{}, e
@@ -293,20 +297,14 @@ func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexch
 	return s.Job(ctx, r)
 }
 
-type WorkItem struct {
-	Job       dataexchange.Job
-	Scope     dataexchange.Scope
-	ObjectKey string
-	Payload   []byte
-	Attempts  int
-}
+type WorkItem = dataexchangemodel.WorkItem
 
 func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (WorkItem, bool, error) {
-	query, args, err := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_queue_scopes").Columns("scope_key").OrderBy(ormbuilder.Ascending("updated_at"), ormbuilder.Ascending("scope_key")).Build()
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_queue_scopes").Columns("scope_key").OrderBy(query.Ascending("updated_at"), query.Ascending("scope_key")).Build()
 	if err != nil {
 		return WorkItem{}, false, err
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, queryValue, args...)
 	if err != nil {
 		return WorkItem{}, false, err
 	}
@@ -338,20 +336,20 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	var x WorkItem
 	var created, updated string
 	now := time.Now().UTC()
-	readyQueued := ormbuilder.And(ormbuilder.Equal("status", "queued"), ormbuilder.Or(
-		ormbuilder.Equal("next_attempt_at", ""), ormbuilder.LessThan("next_attempt_at", now.Format(time.RFC3339Nano)),
+	readyQueued := query.And(query.Equal("status", "queued"), query.Or(
+		query.Equal("next_attempt_at", ""), query.LessThan("next_attempt_at", now.Format(time.RFC3339Nano)),
 	))
-	claimable := ormbuilder.Or(
+	claimable := query.Or(
 		readyQueued,
-		ormbuilder.And(ormbuilder.Equal("status", "running"), ormbuilder.NotEqual("lease_expires_at", ""), ormbuilder.LessThan("lease_expires_at", now.Format(time.RFC3339Nano))),
+		query.And(query.Equal("status", "running"), query.NotEqual("lease_expires_at", ""), query.LessThan("lease_expires_at", now.Format(time.RFC3339Nano))),
 	)
-	query, args, buildErr := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_jobs").
+	queryValue, args, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "fencing_token", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "actor_id", "role_key", "reference_id", "object_key", "request_payload", "attempt_count").
-		Where(ormbuilder.And(ormbuilder.Equal("workspace_id", workspace), claimable)).OrderBy(ormbuilder.Ascending("created_at")).Limit(1).Build()
+		Where(query.And(query.Equal("workspace_id", workspace), claimable)).OrderBy(query.Ascending("created_at")).Limit(1).Build()
 	if buildErr != nil {
 		return x, false, buildErr
 	}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&x.Job.ID, &x.Job.Provider, &x.Job.Operation, &x.Job.Status, &x.Job.Checkpoint, &x.Job.Cursor, &x.Job.Total, &x.Job.ResultChunks, &x.Job.FencingToken, &x.Job.ArtifactID, &x.Job.ErrorCode, &created, &updated, &x.Scope.WorkspaceID, &x.Scope.ActorID, &x.Scope.RoleKey, &x.Job.ReferenceID, &x.ObjectKey, &x.Payload, &x.Attempts)
+	err := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&x.Job.ID, &x.Job.Provider, &x.Job.Operation, &x.Job.Status, &x.Job.Checkpoint, &x.Job.Cursor, &x.Job.Total, &x.Job.ResultChunks, &x.Job.FencingToken, &x.Job.ArtifactID, &x.Job.ErrorCode, &created, &updated, &x.Scope.WorkspaceID, &x.Scope.ActorID, &x.Scope.RoleKey, &x.Job.ReferenceID, &x.ObjectKey, &x.Payload, &x.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return x, false, nil
 	}
@@ -361,12 +359,12 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
 		Set("status", "running").Set("lease_owner", owner).Set("lease_expires_at", now.Add(ttl).Format(time.RFC3339Nano)).
 		Set("next_attempt_at", "").
-		SetExpression("fencing_token", ormbuilder.Add(ormbuilder.Column("fencing_token"), ormbuilder.Value(1))).
+		SetExpression("fencing_token", query.Add(query.Column("fencing_token"), query.Value(1))).
 		Set("updated_at", now.Format(time.RFC3339Nano)).
-		Where(ormbuilder.And(ormbuilder.Equal("id", x.Job.ID), ormbuilder.Equal("workspace_id", workspace), claimable))
+		Where(query.And(query.Equal("id", x.Job.ID), query.Equal("workspace_id", workspace), claimable))
 	res, err := execute(ctx, s.db, update)
 	if err != nil {
 		return x, false, err
@@ -401,13 +399,13 @@ func streamRows(rows *sql.Rows) (io.ReadCloser, error) {
 }
 func (s *Store) Chunks(ctx context.Context, workspace, job, direction string) (io.ReadCloser, error) {
 	ctx = s.Scoped(ctx, workspace, "data-exchange-worker")
-	query, args, e := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_job_chunks").Columns("content").Where(ormbuilder.And(
-		ormbuilder.Equal("workspace_id", workspace), ormbuilder.Equal("job_id", job), ormbuilder.Equal("direction", direction),
-	)).OrderBy(ormbuilder.Ascending("sequence_no")).Build()
+	queryValue, args, e := query.NewSelectBuilder(s.renderer, "_data_exchange_job_chunks").Columns("content").Where(query.And(
+		query.Equal("workspace_id", workspace), query.Equal("job_id", job), query.Equal("direction", direction),
+	)).OrderBy(query.Ascending("sequence_no")).Build()
 	if e != nil {
 		return nil, e
 	}
-	rows, e := s.db.QueryContext(ctx, query, args...)
+	rows, e := s.db.QueryContext(ctx, queryValue, args...)
 	if e != nil {
 		return nil, e
 	}
@@ -434,13 +432,13 @@ func (s *Store) CommitResultPage(ctx context.Context, x WorkItem, seq int, conte
 		return err
 	}
 	defer tx.Rollback()
-	insert := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
+	insert := query.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
 		Columns("workspace_id", "job_id", "direction", "sequence_no", "content", "content_sha256", "created_at").
 		Values(x.Scope.WorkspaceID, x.Job.ID, "result", seq, content, hex.EncodeToString(d[:]), time.Now().UTC().Format(time.RFC3339Nano))
 	if _, err = execute(ctx, tx, insert); err != nil {
 		return err
 	}
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
 		Set("checkpoint_value", checkpoint).Set("checkpoint_cursor", nextCursor).Set("total_value", total).Set("result_chunks", seq+1).
 		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, err := execute(ctx, tx, update)
@@ -454,7 +452,7 @@ func (s *Store) CommitResultPage(ctx context.Context, x WorkItem, seq int, conte
 	return tx.Commit()
 }
 func (s *Store) Progress(ctx context.Context, x WorkItem, checkpoint, total int) error {
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("checkpoint_value", checkpoint).Set("total_value", total).
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("checkpoint_value", checkpoint).Set("total_value", total).
 		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, e := execute(ctx, s.db, update)
 	if e != nil {
@@ -467,15 +465,11 @@ func (s *Store) Progress(ctx context.Context, x WorkItem, checkpoint, total int)
 	return nil
 }
 
-func fencedJob(x WorkItem) ormbuilder.Predicate {
-	return ormbuilder.And(ormbuilder.Equal("id", x.Job.ID), ormbuilder.Equal("status", "running"), ormbuilder.Equal("lease_owner", x.Job.LeaseOwner), ormbuilder.Equal("fencing_token", x.Job.FencingToken))
+func fencedJob(x WorkItem) query.Predicate {
+	return query.And(query.Equal("id", x.Job.ID), query.Equal("status", "running"), query.Equal("lease_owner", x.Job.LeaseOwner), query.Equal("fencing_token", x.Job.FencingToken))
 }
 
-type ArtifactRecord struct {
-	ID, Filename, ContentType, SHA256 string
-	Size                              int64
-	ExpiresAt                         time.Time
-}
+type ArtifactRecord = dataexchangemodel.ArtifactRecord
 
 func (s *Store) Complete(ctx context.Context, x WorkItem, a *ArtifactRecord) error {
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -486,14 +480,14 @@ func (s *Store) Complete(ctx context.Context, x WorkItem, a *ArtifactRecord) err
 	aid := ""
 	if a != nil {
 		aid = a.ID
-		insert := ormbuilder.NewInsertBuilder(s.renderer, "_data_exchange_artifacts").
+		insert := query.NewInsertBuilder(s.renderer, "_data_exchange_artifacts").
 			Columns("id", "workspace_id", "job_id", "filename", "content_type", "content_sha256", "size_bytes", "expires_at", "created_at").
 			Values(a.ID, x.Scope.WorkspaceID, x.Job.ID, a.Filename, a.ContentType, a.SHA256, a.Size, a.ExpiresAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
 		if _, e = execute(ctx, tx, insert); e != nil {
 			return e
 		}
 	}
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
 		Set("lease_owner", "").Set("lease_expires_at", "").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, e := execute(ctx, tx, update)
 	if e != nil {
@@ -514,7 +508,7 @@ func (s *Store) Fail(ctx context.Context, x WorkItem, code string) error {
 		delay := retryInitialDelay * time.Duration(1<<x.Attempts)
 		next = now.Add(delay).Format(time.RFC3339Nano)
 	}
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", status).Set("error_code", code).
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", status).Set("error_code", code).
 		Set("attempt_count", attempts).Set("next_attempt_at", next).Set("lease_owner", "").Set("lease_expires_at", "").
 		Set("updated_at", now.Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, err := execute(ctx, s.db, update)
@@ -533,7 +527,7 @@ func (s *Store) Heartbeat(ctx context.Context, x WorkItem, ttl time.Duration) er
 		ttl = 30 * time.Second
 	}
 	now := time.Now().UTC()
-	update := ormbuilder.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("lease_expires_at", now.Add(ttl).Format(time.RFC3339Nano)).
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("lease_expires_at", now.Add(ttl).Format(time.RFC3339Nano)).
 		Set("updated_at", now.Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, err := execute(ctx, s.db, update)
 	if err != nil {
@@ -549,18 +543,18 @@ func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest) (dataex
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	var a dataexchange.Artifact
 	var expiresAt string
-	query, args, buildErr := ormbuilder.NewSelectBuilder(s.renderer, "_data_exchange_artifacts").Alias("a").Projections(
-		ormbuilder.Project(ormbuilder.QualifiedColumn("a", "id")), ormbuilder.Project(ormbuilder.QualifiedColumn("a", "filename")),
-		ormbuilder.Project(ormbuilder.QualifiedColumn("a", "content_type")), ormbuilder.Project(ormbuilder.QualifiedColumn("a", "content_sha256")),
-		ormbuilder.Project(ormbuilder.QualifiedColumn("a", "size_bytes")), ormbuilder.Project(ormbuilder.QualifiedColumn("a", "expires_at")),
-	).Join(ormbuilder.InnerJoin("_data_exchange_jobs", "j", ormbuilder.EqualExpressions(ormbuilder.QualifiedColumn("j", "id"), ormbuilder.QualifiedColumn("a", "job_id")))).Where(ormbuilder.And(
-		ormbuilder.EqualValue(ormbuilder.QualifiedColumn("j", "id"), r.JobID), ormbuilder.EqualValue(ormbuilder.QualifiedColumn("j", "workspace_id"), r.Scope.WorkspaceID),
-		ormbuilder.EqualValue(ormbuilder.QualifiedColumn("j", "actor_id"), r.Scope.ActorID), ormbuilder.EqualValue(ormbuilder.QualifiedColumn("j", "status"), "completed"),
+	queryValue, args, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_artifacts").Alias("a").Projections(
+		query.Project(query.QualifiedColumn("a", "id")), query.Project(query.QualifiedColumn("a", "filename")),
+		query.Project(query.QualifiedColumn("a", "content_type")), query.Project(query.QualifiedColumn("a", "content_sha256")),
+		query.Project(query.QualifiedColumn("a", "size_bytes")), query.Project(query.QualifiedColumn("a", "expires_at")),
+	).Join(query.InnerJoin("_data_exchange_jobs", "j", query.EqualExpressions(query.QualifiedColumn("j", "id"), query.QualifiedColumn("a", "job_id")))).Where(query.And(
+		query.EqualValue(query.QualifiedColumn("j", "id"), r.JobID), query.EqualValue(query.QualifiedColumn("j", "workspace_id"), r.Scope.WorkspaceID),
+		query.EqualValue(query.QualifiedColumn("j", "actor_id"), r.Scope.ActorID), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
 	)).Build()
 	if buildErr != nil {
 		return a, buildErr
 	}
-	if e := s.db.QueryRowContext(ctx, query, args...).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size, &expiresAt); e != nil {
+	if e := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size, &expiresAt); e != nil {
 		return a, e
 	}
 	a.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiresAt)

@@ -14,9 +14,10 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	"github.com/domainry/domainry-data-exchange/internal/application/exchange"
+	exchange "github.com/domainry/domainry-data-exchange/internal/adapter/dataexchangesdk"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
-	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
+	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 	_ "modernc.org/sqlite"
 )
 
@@ -191,7 +192,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	if err != nil {
 		t.Fatal(err)
 	}
-	migrations, err := persistence.SchemaMigrations(engine, "")
+	migrations, err := persistenceschema.SchemaMigrations(engine, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +218,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	if err != nil {
 		t.Fatal(err)
 	}
-	migrations, err := persistence.SchemaMigrations(engine, "")
+	migrations, err := persistenceschema.SchemaMigrations(engine, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
-	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database"
+	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 )
 
 func TestReleasedMigrationChecksumsRemainStable(t *testing.T) {
