@@ -8,7 +8,9 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	"github.com/domainry/domainry-data-exchange-sdk/saashost"
+	sourcecapability "github.com/domainry/domainry-data-exchange/internal/capability"
 	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
+	"github.com/domainry/domainry-foundation/modulecapability"
 	"github.com/domainry/domainry-foundation/modulehttp"
 )
 
@@ -24,6 +26,17 @@ func (f Factory) OpenSaaS(ctx context.Context, app dataexchange.ApplicationRef, 
 	}
 	if f.transport == nil || host == nil {
 		return nil, fmt.Errorf("Data Exchange SaaS transport and host are required")
+	}
+	localCapability, err := sourcecapability.NewBinding(host)
+	if err != nil {
+		return nil, fmt.Errorf("open Data Exchange source capability: %w", err)
+	}
+	localSummary, err := localCapability.CapabilitySummary(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load Data Exchange source capability summary: %w", err)
+	}
+	if err := modulecapability.VerifyPinnedBinding(ctx, f.transport, "data_exchange", localSummary.Identity.ContractSHA256); err != nil {
+		return nil, fmt.Errorf("verify Data Exchange SaaS capability: %w", err)
 	}
 	descriptor, err := f.transport.Descriptor(ctx, app)
 	if err != nil {
@@ -54,6 +67,15 @@ type binding struct {
 }
 
 func (b *binding) Descriptor() dataexchange.Descriptor { return b.descriptor }
+func (b *binding) CapabilitySummary(ctx context.Context) (modulecapability.ModuleSummary, error) {
+	return b.transport.CapabilitySummary(ctx)
+}
+func (b *binding) CapabilityCategory(ctx context.Context, key string) (modulecapability.CategoryDocument, error) {
+	return b.transport.CapabilityCategory(ctx, key)
+}
+func (b *binding) ValidateCapabilityCandidate(ctx context.Context, request modulecapability.ValidationRequest) (modulecapability.ValidationResult, error) {
+	return b.transport.ValidateCapabilityCandidate(ctx, request)
+}
 func (b *binding) HTTPSurfaces() []modulehttp.Surface {
 	return append([]modulehttp.Surface(nil), b.surfaces...)
 }

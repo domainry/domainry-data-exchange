@@ -471,5 +471,3 @@ func (b *Service) processExportArtifact(ctx context.Context, x dataexchangemodel
 	}
 	return b.store.Complete(ctx, x, record)
 }
-
-var _ dataexchange.Binding = (*Service)(nil)

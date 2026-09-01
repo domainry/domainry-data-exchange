@@ -6,6 +6,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	dataexchangecapability "github.com/domainry/domainry-data-exchange/capability"
 	dataexchangesdkadapter "github.com/domainry/domainry-data-exchange/internal/adapter/dataexchangesdk"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
@@ -46,7 +47,11 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	binding := dataexchangesdkadapter.NewBinding(application, host, store)
+	capabilityBinding, err := dataexchangecapability.Open(dataexchangecapability.Inputs{Host: host})
+	if err != nil {
+		return nil, fmt.Errorf("build Data Exchange capability disclosure: %w", err)
+	}
+	binding := dataexchangesdkadapter.NewBinding(application, host, store, capabilityBinding)
 	surface, err := modulehttptransport.NewSurface(binding, host)
 	if err != nil {
 		return nil, err

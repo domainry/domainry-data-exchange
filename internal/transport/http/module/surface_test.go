@@ -202,7 +202,7 @@ func hasOpenAPIParameter(operation map[string]any, name string) bool {
 	return false
 }
 
-var _ dataexchange.Binding = (*bindingProbe)(nil)
+var _ jobBinding = (*bindingProbe)(nil)
 var _ modulehost.Host = (*projectingHost)(nil)
 var _ modulehost.JobProjector = projectingProvider{}
 var _ modulehost.JobArtifactOpener = projectingProvider{}

@@ -1,6 +1,7 @@
 package module
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,54 +19,62 @@ import (
 )
 
 type surface struct {
-	binding dataexchange.Binding
+	binding jobBinding
 	host    modulehost.Host
 	mux     *http.ServeMux
 	routes  []modulehttp.Route
 }
 
+type jobBinding interface {
+	Job(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
+	Cancel(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
+	Download(context.Context, dataexchange.JobRequest) (dataexchange.Artifact, error)
+}
+
 func (*surface) ContractVersion() string { return modulehttp.ContractVersion }
-func (*surface) Owner() string           { return "data_exchange" }
-func (*surface) Name() string            { return "job_management" }
+func (*surface) Owner() string           { return dataexchange.DataExchangeHTTPSurfaceContract().Owner }
+func (*surface) Name() string            { return dataexchange.DataExchangeHTTPSurfaceContract().Name }
 func (s *surface) Handler() http.Handler { return s.mux }
 func (s *surface) Routes() []modulehttp.Route {
 	return append([]modulehttp.Route(nil), s.routes...)
 }
 
 func (s *surface) OpenAPIOperations() map[string]map[string]any {
-	return map[string]map[string]any{
-		"GET /data-exchange/jobs/{jobID}":          jobOpenAPIOperation("getDataExchangeJob", "Get an actor-owned Data Exchange job"),
-		"POST /data-exchange/jobs/{jobID}/cancel":  jobOpenAPIOperation("cancelDataExchangeJob", "Cancel an actor-owned Data Exchange job"),
-		"GET /data-exchange/jobs/{jobID}/download": jobDownloadOpenAPIOperation(),
-	}
+	return dataexchange.DataExchangeHTTPSurfaceContract().OpenAPI
 }
 
-func NewSurface(binding dataexchange.Binding, host modulehost.Host) (modulehttp.Surface, error) {
+func NewSurface(binding jobBinding, host modulehost.Host) (modulehttp.Surface, error) {
 	if binding == nil {
 		return nil, errors.New("Data Exchange HTTP binding is unavailable")
 	}
 	s := &surface{binding: binding, host: host, mux: http.NewServeMux()}
-	s.routes = []modulehttp.Route{
-		jobRoute("GET /data-exchange/jobs/{jobID}", modulehttp.EffectRead, "not_applicable", "owner_read_audit_policy"),
-		jobRoute("POST /data-exchange/jobs/{jobID}/cancel", modulehttp.EffectWrite, "natural_key", "mutation_audit_required"),
-		jobRoute("GET /data-exchange/jobs/{jobID}/download", modulehttp.EffectRead, "not_applicable", "business_export_download_audit"),
-	}
+	s.routes = dataExchangeRoutes()
 	s.mux.HandleFunc("GET /data-exchange/jobs/{jobID}", s.getJob)
 	s.mux.HandleFunc("POST /data-exchange/jobs/{jobID}/cancel", s.cancelJob)
 	s.mux.HandleFunc("GET /data-exchange/jobs/{jobID}/download", s.downloadJob)
 	return s, nil
 }
 
-func jobRoute(pattern string, effect modulehttp.EffectClass, idempotency, audit string) modulehttp.Route {
-	return modulehttp.Route{
-		Pattern: pattern, Exposures: []modulehttp.Exposure{modulehttp.ExposurePublic},
-		Authentication: modulehttp.AuthenticationAuthenticated, PrincipalOnly: true,
-		Governance: &modulehttp.Governance{
-			EffectClass: effect, HighRiskPolicy: modulehttp.HighRiskNone,
-			IdempotencyDecision: idempotency, AuditClass: audit,
-		},
+func dataExchangeRoutes() []modulehttp.Route {
+	contract := dataexchange.DataExchangeHTTPSurfaceContract()
+	routes := make([]modulehttp.Route, 0, len(contract.Routes))
+	for _, route := range contract.Routes {
+		exposures := make([]modulehttp.Exposure, len(route.Exposures))
+		for index, exposure := range route.Exposures {
+			exposures[index] = modulehttp.Exposure(exposure)
+		}
+		routes = append(routes, modulehttp.Route{
+			Pattern: route.Pattern, Exposures: exposures, Authentication: modulehttp.Authentication(route.Authentication), Permission: route.Permission,
+			AnyPermissions: append([]string(nil), route.AnyPermissions...), PrincipalOnly: route.PrincipalOnly,
+			Governance: &modulehttp.Governance{EffectClass: modulehttp.EffectClass(route.EffectClass), HighRiskPolicy: modulehttp.HighRiskPolicy(route.HighRiskPolicy), IdempotencyDecision: route.IdempotencyDecision, AuditClass: route.AuditClass},
+		})
 	}
+	return routes
 }
+
+// CapabilityRoutes returns the exact SDK-derived route manifest used by the
+// capability projection without exposing the HTTP handler implementation.
+func CapabilityRoutes() []modulehttp.Route { return dataExchangeRoutes() }
 
 func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
 	jobRequest, ok := httpJobRequest(response, request)
@@ -252,32 +261,6 @@ func writeError(response http.ResponseWriter, err error) {
 		code = "backend.data_exchange.internal"
 	}
 	writeJSON(response, status, map[string]string{"code": code})
-}
-
-func jobDownloadOpenAPIOperation() map[string]any {
-	operation := jobOpenAPIOperation("downloadDataExchangeJob", "Download an actor-owned completed Data Exchange export")
-	operation["responses"] = map[string]any{
-		"200": map[string]any{"description": "Export artifact", "content": map[string]any{"application/octet-stream": map[string]any{"schema": map[string]any{"type": "string", "format": "binary"}}}},
-		"404": map[string]any{"description": "Job not found"}, "409": map[string]any{"description": "Artifact unavailable"},
-	}
-	return operation
-}
-
-func jobOpenAPIOperation(operationID, summary string) map[string]any {
-	parameters := []map[string]any{
-		{"name": "jobID", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
-		{"name": "provider", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
-		{"name": "operation", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"import", "export"}}},
-	}
-	return map[string]any{
-		"operationId": operationID, "summary": summary, "tags": []string{"Data Exchange"},
-		"security": []any{map[string]any{"BearerAuth": []any{}}}, "parameters": parameters,
-		"responses": map[string]any{"200": map[string]any{
-			"description": "Provider-owned Data Exchange job projection",
-			"content":     map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "additionalProperties": true}}},
-		}},
-		"x-domainry-runtime-client-method": operationID,
-	}
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
