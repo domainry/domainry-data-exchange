@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,7 +42,7 @@ func (s *surface) Routes() []modulehttp.Route {
 }
 
 func (s *surface) OpenAPIOperations() map[string]map[string]any {
-	return dataexchange.DataExchangeHTTPSurfaceContract().OpenAPI
+	return dataexchange.DataExchangeHTTPSurfaceContract().OpenAPIOperations()
 }
 
 func NewSurface(binding jobBinding, host modulehost.Host) (modulehttp.Surface, error) {
@@ -48,33 +50,60 @@ func NewSurface(binding jobBinding, host modulehost.Host) (modulehttp.Surface, e
 		return nil, errors.New("Data Exchange HTTP binding is unavailable")
 	}
 	s := &surface{binding: binding, host: host, mux: http.NewServeMux()}
-	s.routes = dataExchangeRoutes()
-	s.mux.HandleFunc("GET /data-exchange/jobs/{jobID}", s.getJob)
-	s.mux.HandleFunc("POST /data-exchange/jobs/{jobID}/cancel", s.cancelJob)
-	s.mux.HandleFunc("GET /data-exchange/jobs/{jobID}/download", s.downloadJob)
+	var err error
+	s.routes, err = dataExchangeRoutes()
+	if err != nil {
+		return nil, err
+	}
+	handlers := map[string]http.HandlerFunc{
+		dataexchange.ActionDataExchangeJobGet:      s.getJob,
+		dataexchange.ActionDataExchangeJobCancel:   s.cancelJob,
+		dataexchange.ActionDataExchangeJobDownload: s.downloadJob,
+	}
+	operations := s.OpenAPIOperations()
+	for _, route := range s.routes {
+		key := strings.TrimSpace(route.Action.Key)
+		handler, found := handlers[key]
+		if !found {
+			return nil, fmt.Errorf("Data Exchange Action %q has no HTTP handler", key)
+		}
+		if _, found := operations[route.Pattern()]; !found {
+			return nil, fmt.Errorf("Data Exchange Action %q has no OpenAPI operation", key)
+		}
+		s.mux.HandleFunc(route.Pattern(), handler)
+		delete(handlers, key)
+		delete(operations, route.Pattern())
+	}
+	if len(handlers) != 0 || len(operations) != 0 {
+		keys := make([]string, 0, len(handlers)+len(operations))
+		for key := range handlers {
+			keys = append(keys, "handler:"+key)
+		}
+		for pattern := range operations {
+			keys = append(keys, "openapi:"+pattern)
+		}
+		sort.Strings(keys)
+		return nil, fmt.Errorf("Data Exchange implementations have no Action manifest entries: %v", keys)
+	}
 	return s, nil
 }
 
-func dataExchangeRoutes() []modulehttp.Route {
+func dataExchangeRoutes() ([]modulehttp.Route, error) {
 	contract := dataexchange.DataExchangeHTTPSurfaceContract()
 	routes := make([]modulehttp.Route, 0, len(contract.Routes))
-	for _, route := range contract.Routes {
-		exposures := make([]modulehttp.Exposure, len(route.Exposures))
-		for index, exposure := range route.Exposures {
-			exposures[index] = modulehttp.Exposure(exposure)
+	for _, declared := range contract.Routes {
+		route, err := modulehttp.RouteFromAction(declared.Action)
+		if err != nil {
+			return nil, fmt.Errorf("project Data Exchange Action %q: %w", declared.Action.Key, err)
 		}
-		routes = append(routes, modulehttp.Route{
-			Pattern: route.Pattern, Exposures: exposures, Authentication: modulehttp.Authentication(route.Authentication), Permission: route.Permission,
-			AnyPermissions: append([]string(nil), route.AnyPermissions...), PrincipalOnly: route.PrincipalOnly,
-			Governance: &modulehttp.Governance{EffectClass: modulehttp.EffectClass(route.EffectClass), HighRiskPolicy: modulehttp.HighRiskPolicy(route.HighRiskPolicy), IdempotencyDecision: route.IdempotencyDecision, AuditClass: route.AuditClass},
-		})
+		routes = append(routes, route)
 	}
-	return routes
+	return routes, nil
 }
 
 // CapabilityRoutes returns the exact SDK-derived route manifest used by the
 // capability projection without exposing the HTTP handler implementation.
-func CapabilityRoutes() []modulehttp.Route { return dataExchangeRoutes() }
+func CapabilityRoutes() ([]modulehttp.Route, error) { return dataExchangeRoutes() }
 
 func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
 	jobRequest, ok := httpJobRequest(response, request)

@@ -39,15 +39,22 @@ type JobSelectorCandidate struct {
 
 func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
 	contract := dataexchange.DataExchangeHTTPSurfaceContract()
+	routes, err := modulehttptransport.CapabilityRoutes()
+	if err != nil {
+		return nil, fmt.Errorf("project Data Exchange capability routes: %w", err)
+	}
 	overrides := map[string]modulecapability.OperationExtension{}
-	for _, route := range modulehttptransport.CapabilityRoutes() {
-		idempotency := modulecapability.Idempotency{Mode: route.Governance.IdempotencyDecision}
-		if route.Pattern == "POST /data-exchange/jobs/{jobID}/cancel" {
+	for _, route := range routes {
+		idempotency := modulecapability.Idempotency{Mode: route.Action.IdempotencyDecision}
+		if route.Action.Key == dataexchange.ActionDataExchangeJobCancel {
 			idempotency.KeySource = "path.jobID"
 		}
-		overrides[route.Pattern] = modulecapability.OperationExtension{
-			Owner: "data_exchange", Authorization: modulecapability.Authorization{Mode: modulecapability.AuthorizationDynamic, PolicyKey: "data_exchange.job_owner", WorkspaceScope: "authenticated_workspace"},
-			Effect: modulecapability.EffectClass(route.Governance.EffectClass), Idempotency: idempotency,
+		overrides[route.Pattern()] = modulecapability.OperationExtension{
+			Owner: "data_exchange", Authorization: modulecapability.Authorization{
+				Strategy: route.Action.Authorization.Strategy, PolicyKey: route.Action.Authorization.PolicyKey,
+				Audiences: append([]string(nil), route.Action.Authorization.Audiences...), WorkspaceScope: "authenticated_workspace",
+			},
+			Effect: modulecapability.EffectClass(route.Action.EffectClass), Idempotency: idempotency,
 		}
 	}
 	jobs, err := modulecapability.CategoryFromHTTPRoutes(modulecapability.HTTPRouteCategory{
@@ -55,7 +62,7 @@ func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
 			Key: JobsCategory, Name: "Data Exchange jobs", Description: "Inspect, cancel, and download actor-owned durable import/export jobs.",
 			AssemblyChains: []string{"data_exchange_job_to_file_download"}, ValidationScopes: []string{},
 		},
-		Routes: modulehttptransport.CapabilityRoutes(), Operations: contract.OpenAPI, WorkspaceScope: "authenticated_workspace", ExtensionOverrides: overrides,
+		Routes: routes, Operations: contract.OpenAPIOperations(), WorkspaceScope: "authenticated_workspace", ExtensionOverrides: overrides,
 		Components: map[string]map[string]json.RawMessage{
 			"securitySchemes": {"BearerAuth": json.RawMessage(`{"type":"http","scheme":"bearer","bearerFormat":"JWT"}`)},
 		},

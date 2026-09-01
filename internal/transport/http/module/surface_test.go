@@ -11,6 +11,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	actioncontract "github.com/domainry/domainry-foundation/action"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
@@ -79,7 +80,7 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	if err := modulehttp.ValidateSurface(surface); err != nil {
 		t.Fatal(err)
 	}
-	if routes := surface.Routes(); len(routes) != 3 || routes[0].Pattern != "GET /data-exchange/jobs/{jobID}" || !routes[0].PrincipalOnly || routes[0].Exposures[0] != modulehttp.ExposurePublic || routes[1].Governance == nil || routes[1].Governance.IdempotencyDecision != "natural_key" || routes[2].Pattern != "GET /data-exchange/jobs/{jobID}/download" {
+	if routes := surface.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticatedPrincipal || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
 		t.Fatalf("routes=%+v", routes)
 	}
 	if operations := surface.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
