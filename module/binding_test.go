@@ -20,6 +20,7 @@ import (
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	identitysdk "github.com/domainry/domainry-identity-sdk"
 	_ "modernc.org/sqlite"
 )
 
@@ -242,7 +243,7 @@ func waitCompleted(t *testing.T, b dataexchange.Binding, scope dataexchange.Scop
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		j, err := b.Job(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: id})
+		j, err := b.Job(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: id})
 		if err == nil && (j.Status == "completed" || j.Status == "failed") {
 			return j
 		}
@@ -250,6 +251,28 @@ func waitCompleted(t *testing.T, b dataexchange.Binding, scope dataexchange.Scop
 	}
 	t.Fatal("job did not complete")
 	return dataexchange.Job{}
+}
+
+func jobAuthorizedContext(ctx context.Context, scope dataexchange.Scope, permissions ...string) context.Context {
+	bundle := &identitysdk.AccessBundle{
+		ContractVersion: identitysdk.CurrentPolicyBundleVersion,
+		Subject:         identitysdk.Subject{WorkspaceID: identitysdk.WorkspaceID(scope.WorkspaceID), SubjectID: identitysdk.SubjectID(scope.ActorID)},
+	}
+	for _, permission := range permissions {
+		separator := strings.LastIndexByte(permission, '.')
+		if separator <= 0 || separator == len(permission)-1 {
+			continue
+		}
+		resource, action := permission[:separator], permission[separator+1:]
+		bundle.FunctionGrants = append(bundle.FunctionGrants, identitysdk.FunctionGrant{Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow})
+		bundle.DataPolicies = append(bundle.DataPolicies, identitysdk.DataPolicy{
+			Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
+			DataScopes: []identitysdk.DataScope{identitysdk.DataScopeOwner}, Predicate: identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"},
+		})
+	}
+	return identitysdk.WithRequestIdentity(ctx, identitysdk.RequestIdentity{Principal: identitysdk.Principal{
+		Known: true, WorkspaceID: scope.WorkspaceID, UserID: scope.ActorID, RoleKey: scope.RoleKey, AccessBundle: bundle,
+	}})
 }
 
 func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
@@ -328,7 +351,7 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	if string(completed.Options) != "" || completed.ReferenceID != "audit-1" {
 		t.Fatalf("options=%q", completed.Options)
 	}
-	artifact, err := b.Download(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +405,7 @@ func TestModulePersistsCanonicalExportArtifact(t *testing.T) {
 	if completed.Status != "completed" {
 		t.Fatalf("completed=%+v", completed)
 	}
-	artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +448,7 @@ func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
 	if err := binding.Process(t.Context(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +513,7 @@ func TestModuleNeverAppliesRejectedImport(t *testing.T) {
 	}
 }
 
-func TestJobOwnershipConstraintsApplyAtomicallyToQueryAndCancel(t *testing.T) {
+func TestJobRequestConstraintsApplyAtomicallyToQueryAndCancel(t *testing.T) {
 	binding, _, _ := openTestBinding(t)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
 	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
@@ -500,20 +523,20 @@ func TestJobOwnershipConstraintsApplyAtomicallyToQueryAndCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrongOwner := dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "reports", Operation: "export"}
-	if _, err := binding.Job(t.Context(), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-provider query error=%v; want ErrJobNotFound", err)
 	}
-	if _, err := binding.Cancel(t.Context(), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Cancel(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobCancel), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-provider cancel error=%v; want ErrJobNotFound", err)
 	}
-	current, err := binding.Job(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "export"})
+	current, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "export"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if current.Status != "queued" {
 		t.Fatalf("cross-provider cancel changed status to %q", current.Status)
 	}
-	if _, err := binding.Job(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "import"}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "import"}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-operation query error=%v; want ErrJobNotFound", err)
 	}
 }
@@ -542,7 +565,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), jobID); err != nil {
 			t.Fatal(err)
 		}
-		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +580,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 		if _, err := db.Exec(`UPDATE _data_exchange_job_chunks SET content_sha256='bad' WHERE job_id=? AND direction='result'`, jobID); err != nil {
 			t.Fatal(err)
 		}
-		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -572,7 +595,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET size_bytes=size_bytes+1 WHERE job_id=?`, jobID); err != nil {
 			t.Fatal(err)
 		}
-		artifact, err := binding.Download(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
+		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -615,7 +638,7 @@ func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
 	if err = b.Process(context.Background(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := b.Download(context.Background(), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,5 +682,107 @@ func TestExportIdempotencyRejectsChangedOwnerReference(t *testing.T) {
 	request.ReferenceID = "audit-two"
 	if _, _, err := b.SubmitExport(t.Context(), request); err == nil || !strings.Contains(err.Error(), "different request") {
 		t.Fatalf("changed owner reference was accepted: %v", err)
+	}
+}
+
+func TestModuleJobOwnerScopeKeepsActorAndWorkspaceIsolation(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	peerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "bob"}
+	peer, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: peerScope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "owner-peer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignScope := dataexchange.Scope{WorkspaceID: "workspace-other", ActorID: "bob"}
+	foreign, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: foreignScope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "owner-foreign",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	managerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "manager"}
+	managerCtx := jobAuthorizedContext(t.Context(), managerScope, dataexchange.ActionDataExchangeJobGet)
+	if _, err := binding.Job(managerCtx, dataexchange.JobRequest{Scope: managerScope, JobID: peer.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("peer read error=%v", err)
+	}
+	bobCtx := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobGet)
+	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID}); err != nil {
+		t.Fatalf("owner read: %v", err)
+	}
+	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: foreign.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("cross-workspace read error=%v", err)
+	}
+}
+
+func TestModuleCancelRequiresExactPermissionAndOwnerScope(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	peerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "bob"}
+	peer, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: peerScope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "cancel-peer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	managerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "manager"}
+	managerCancel := jobAuthorizedContext(t.Context(), managerScope, dataexchange.ActionDataExchangeJobCancel)
+	if _, err := binding.Cancel(managerCancel, dataexchange.JobRequest{Scope: managerScope, JobID: peer.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("peer cancel error=%v", err)
+	}
+
+	bobRead := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobGet)
+	current, err := binding.Job(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID})
+	if err != nil || current.Status != "queued" {
+		t.Fatalf("queued candidate: job=%+v err=%v", current, err)
+	}
+	if _, err := binding.Cancel(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
+		t.Fatalf("different exact Permission cancelled job: %v", err)
+	}
+	bobCancel := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobCancel)
+	cancelled, err := binding.Cancel(bobCancel, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID})
+	if err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("cancel=%+v err=%v", cancelled, err)
+	}
+}
+
+func TestModuleArtifactDownloadRequiresExactPermissionAndWorkspace(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	bobScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "bob"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: bobScope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "download-scope",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
+	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+	if completed := waitCompleted(t, binding, bobScope, job.ID); completed.Status != "completed" {
+		t.Fatalf("completed=%+v", completed)
+	}
+
+	aliceScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "alice"}
+	wrongExact := jobAuthorizedContext(t.Context(), aliceScope, dataexchange.ActionDataExchangeJobGet)
+	if _, err := binding.Download(wrongExact, dataexchange.JobRequest{Scope: aliceScope, JobID: job.ID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
+		t.Fatalf("different exact Permission downloaded artifact: %v", err)
+	}
+	aliceDownload := jobAuthorizedContext(t.Context(), aliceScope, dataexchange.ActionDataExchangeJobDownload)
+	if _, err := binding.Download(aliceDownload, dataexchange.JobRequest{Scope: aliceScope, JobID: job.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("peer download error=%v", err)
+	}
+	bobDownload := jobAuthorizedContext(t.Context(), bobScope, dataexchange.ActionDataExchangeJobDownload)
+	artifact, err := binding.Download(bobDownload, dataexchange.JobRequest{Scope: bobScope, JobID: job.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Content.Close()
+	if _, err := io.ReadAll(artifact.Content); err != nil {
+		t.Fatal(err)
+	}
+	foreignScope := dataexchange.Scope{WorkspaceID: "workspace-other", ActorID: "bob"}
+	foreignCtx := jobAuthorizedContext(t.Context(), foreignScope, dataexchange.ActionDataExchangeJobDownload)
+	if _, err := binding.Download(foreignCtx, dataexchange.JobRequest{Scope: foreignScope, JobID: job.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+		t.Fatalf("cross-workspace download error=%v", err)
 	}
 }

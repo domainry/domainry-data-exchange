@@ -17,10 +17,25 @@ Both bindings also expose the Data Exchange-owned `modulehttp.Surface` for
 `GET /data-exchange/jobs/{jobID}` and
 `POST /data-exchange/jobs/{jobID}/cancel`, plus
 `GET /data-exchange/jobs/{jobID}/download`. The host authenticates the request;
-Data Exchange derives workspace/actor scope from that authenticated principal
+each route requires its same-key `data_exchange.jobs.*` Permission and that
+exact grant's canonical `owner` data scope before repository access. Data
+Exchange derives workspace/actor identity from that authenticated principal
 and never serializes raw provider options, lease state, or fencing tokens. An
 optional provider-owned projector can preserve an existing public Record or
 Report job response without moving domain payload decoding into Data Exchange.
+
+The durable job is the authorization root. Artifact rows and chunks remain
+linked through the authorized job and do not carry a second copy of role or
+data-scope policy. Owner scope is pushed into SQL as the authenticated
+`actor_id`, and workspace isolation is always part of the same query. Cancel
+performs its scoped candidate read and final scoped update in one transaction.
+There is currently no bulk job mutation HTTP contract, so no synthetic batch
+API is provided.
+
+Import and export providers remain responsible for authorizing their business
+rows with the source module's own exact Permission and data scope. A Data
+Exchange job grant controls only durable job/artifact lifecycle and cannot widen
+the provider's business-data access.
 
 ## Durable invariants
 

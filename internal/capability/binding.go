@@ -59,7 +59,7 @@ func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
 	}
 	jobs, err := modulecapability.CategoryFromHTTPRoutes(modulecapability.HTTPRouteCategory{
 		Owner: "data_exchange", Category: modulecapability.CategorySummary{
-			Key: JobsCategory, Name: "Data Exchange jobs", Description: "Inspect, cancel, and download actor-owned durable import/export jobs.",
+			Key: JobsCategory, Name: "Data Exchange jobs", Description: "Inspect, cancel, and download only the authenticated actor's workspace-isolated durable import/export jobs with the current exact Permission and its owner data scope.",
 			AssemblyChains: []string{"data_exchange_job_to_file_download"}, ValidationScopes: []string{},
 		},
 		Routes: routes, Operations: contract.OpenAPIOperations(), WorkspaceScope: "authenticated_workspace", ExtensionOverrides: overrides,

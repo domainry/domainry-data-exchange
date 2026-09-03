@@ -15,6 +15,8 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
+	actioncontract "github.com/domainry/domainry-foundation/action"
 	"github.com/domainry/domainry-foundation/apperror"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
@@ -31,6 +33,10 @@ type jobBinding interface {
 	Job(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
 	Cancel(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
 	Download(context.Context, dataexchange.JobRequest) (dataexchange.Artifact, error)
+}
+
+type actionScopedJobBinding interface {
+	JobForAction(context.Context, dataexchange.JobRequest, string) (dataexchange.Job, error)
 }
 
 func (*surface) ContractVersion() string { return modulehttp.ContractVersion }
@@ -92,7 +98,11 @@ func dataExchangeRoutes() ([]modulehttp.Route, error) {
 	contract := dataexchange.DataExchangeHTTPSurfaceContract()
 	routes := make([]modulehttp.Route, 0, len(contract.Routes))
 	for _, declared := range contract.Routes {
-		route, err := modulehttp.RouteFromAction(declared.Action)
+		action, err := exactPermissionAction(declared.Action)
+		if err != nil {
+			return nil, err
+		}
+		route, err := modulehttp.RouteFromAction(action)
 		if err != nil {
 			return nil, fmt.Errorf("project Data Exchange Action %q: %w", declared.Action.Key, err)
 		}
@@ -101,12 +111,29 @@ func dataExchangeRoutes() ([]modulehttp.Route, error) {
 	return routes, nil
 }
 
+func exactPermissionAction(action actioncontract.ActionDefinition) (actioncontract.ActionDefinition, error) {
+	separator := strings.LastIndexByte(strings.TrimSpace(action.Key), '.')
+	if separator <= 0 || separator == len(action.Key)-1 {
+		return actioncontract.ActionDefinition{}, fmt.Errorf("Data Exchange Action %q cannot define an exact Permission", action.Key)
+	}
+	if action.Permission == nil {
+		action.Permission = &actioncontract.PermissionDefinition{
+			Key: action.Key, Owner: action.Owner, ResourceKey: action.Key[:separator], OperationKey: action.Key[separator+1:],
+			Label: action.Label, Description: action.OperationLabel, Category: action.CapabilityLabel, LifecycleStatus: actioncontract.LifecycleActive,
+		}
+	}
+	if action.Permission.Key != action.Key {
+		return actioncontract.ActionDefinition{}, fmt.Errorf("Data Exchange Action %q must use its same-key Permission", action.Key)
+	}
+	return actioncontract.NormalizeDefinition(action)
+}
+
 // CapabilityRoutes returns the exact SDK-derived route manifest used by the
 // capability projection without exposing the HTTP handler implementation.
 func CapabilityRoutes() ([]modulehttp.Route, error) { return dataExchangeRoutes() }
 
 func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
-	jobRequest, ok := httpJobRequest(response, request)
+	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobGet)
 	if !ok {
 		return
 	}
@@ -124,7 +151,7 @@ func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *surface) cancelJob(response http.ResponseWriter, request *http.Request) {
-	jobRequest, ok := httpJobRequest(response, request)
+	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobCancel)
 	if !ok {
 		return
 	}
@@ -142,11 +169,17 @@ func (s *surface) cancelJob(response http.ResponseWriter, request *http.Request)
 }
 
 func (s *surface) downloadJob(response http.ResponseWriter, request *http.Request) {
-	jobRequest, ok := httpJobRequest(response, request)
+	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobDownload)
 	if !ok {
 		return
 	}
-	job, err := s.binding.Job(request.Context(), jobRequest)
+	var job dataexchange.Job
+	var err error
+	if scoped, supported := s.binding.(actionScopedJobBinding); supported {
+		job, err = scoped.JobForAction(request.Context(), jobRequest, dataexchange.ActionDataExchangeJobDownload)
+	} else {
+		job, err = s.binding.Job(request.Context(), jobRequest)
+	}
 	if err != nil {
 		writeError(response, err)
 		return
@@ -219,7 +252,7 @@ func (s *surface) projectJob(request *http.Request, job dataexchange.Job, scope 
 	return projectJob(job), nil
 }
 
-func httpJobRequest(response http.ResponseWriter, request *http.Request) (dataexchange.JobRequest, bool) {
+func httpJobRequest(response http.ResponseWriter, request *http.Request, permissionKey string) (dataexchange.JobRequest, bool) {
 	principal, ok := identitysdk.PrincipalFromContext(request.Context())
 	if !ok {
 		writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "backend.authentication_required"})
@@ -233,6 +266,10 @@ func httpJobRequest(response http.ResponseWriter, request *http.Request) (dataex
 	}
 	if err := jobRequest.Validate(); err != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_request"})
+		return dataexchange.JobRequest{}, false
+	}
+	if _, err := dataexchangeservice.ResolveJobAccess(request.Context(), jobRequest, permissionKey); err != nil {
+		writeError(response, err)
 		return dataexchange.JobRequest{}, false
 	}
 	return jobRequest, true

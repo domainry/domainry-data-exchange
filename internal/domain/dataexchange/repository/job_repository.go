@@ -13,9 +13,9 @@ import (
 type JobRepository interface {
 	SubmitImport(context.Context, dataexchange.ImportRequest) (dataexchange.Job, bool, error)
 	SubmitExport(context.Context, dataexchange.ExportRequest) (dataexchange.Job, bool, error)
-	Job(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
-	Cancel(context.Context, dataexchange.JobRequest) (dataexchange.Job, error)
-	Artifact(context.Context, dataexchange.JobRequest) (dataexchange.Artifact, error)
+	Job(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Job, error)
+	Cancel(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Job, error)
+	Artifact(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Artifact, error)
 	Claim(context.Context, string, time.Duration) (model.WorkItem, bool, error)
 	Chunks(context.Context, string, string, string) (io.ReadCloser, error)
 	ResultIdentity(context.Context, string, string) (string, int64, error)

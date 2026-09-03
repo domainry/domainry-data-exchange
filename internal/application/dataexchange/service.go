@@ -59,22 +59,46 @@ func (b *Service) SubmitExport(ctx context.Context, r dataexchange.ExportRequest
 	return b.store.SubmitExport(ctx, r)
 }
 func (b *Service) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+	return b.JobForAction(ctx, r, dataexchange.ActionDataExchangeJobGet)
+}
+
+// JobForAction is used by the shared download HTTP path so its prerequisite
+// lookup is governed by the download Permission rather than accidentally
+// requiring the independent get Permission as well.
+func (b *Service) JobForAction(ctx context.Context, r dataexchange.JobRequest, permissionKey string) (dataexchange.Job, error) {
 	if e := r.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
-	return b.store.Job(ctx, r)
+	switch permissionKey {
+	case dataexchange.ActionDataExchangeJobGet, dataexchange.ActionDataExchangeJobDownload:
+	default:
+		return dataexchange.Job{}, fmt.Errorf("unsupported Data Exchange job permission %q", permissionKey)
+	}
+	access, err := dataexchangeservice.ResolveJobAccess(ctx, r, permissionKey)
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	return b.store.Job(ctx, r, access)
 }
 func (b *Service) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	if e := r.Validate(); e != nil {
 		return dataexchange.Job{}, e
 	}
-	return b.store.Cancel(ctx, r)
+	access, err := dataexchangeservice.ResolveJobAccess(ctx, r, dataexchange.ActionDataExchangeJobCancel)
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	return b.store.Cancel(ctx, r, access)
 }
 func (b *Service) Download(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
 	if e := r.Validate(); e != nil {
 		return dataexchange.Artifact{}, e
 	}
-	return b.store.Artifact(ctx, r)
+	access, err := dataexchangeservice.ResolveJobAccess(ctx, r, dataexchange.ActionDataExchangeJobDownload)
+	if err != nil {
+		return dataexchange.Artifact{}, err
+	}
+	return b.store.Artifact(ctx, r, access)
 }
 func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-chan struct{} {
 	done := make(chan struct{})

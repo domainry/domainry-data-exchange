@@ -64,9 +64,35 @@ func probeJob(request dataexchange.JobRequest) dataexchange.Job {
 }
 
 func authenticatedRequest(method, target string) *http.Request {
+	permission := dataexchange.ActionDataExchangeJobGet
+	if method == http.MethodPost && strings.Contains(target, "/cancel") {
+		permission = dataexchange.ActionDataExchangeJobCancel
+	} else if strings.Contains(target, "/download") {
+		permission = dataexchange.ActionDataExchangeJobDownload
+	}
+	return requestWithPermissions(method, target, permission)
+}
+
+func requestWithPermissions(method, target string, permissions ...string) *http.Request {
 	request := httptest.NewRequest(method, target, nil)
+	bundle := &identitysdk.AccessBundle{
+		ContractVersion: identitysdk.CurrentPolicyBundleVersion,
+		Subject:         identitysdk.Subject{WorkspaceID: "workspace", SubjectID: "actor"},
+	}
+	for _, permission := range permissions {
+		separator := strings.LastIndexByte(permission, '.')
+		if separator <= 0 || separator == len(permission)-1 {
+			continue
+		}
+		resource, action := permission[:separator], permission[separator+1:]
+		bundle.FunctionGrants = append(bundle.FunctionGrants, identitysdk.FunctionGrant{Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow})
+		bundle.DataPolicies = append(bundle.DataPolicies, identitysdk.DataPolicy{
+			Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
+			DataScopes: []identitysdk.DataScope{identitysdk.DataScopeOwner}, Predicate: identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"},
+		})
+	}
 	ctx := identitysdk.WithRequestIdentity(request.Context(), identitysdk.RequestIdentity{Principal: identitysdk.Principal{
-		Known: true, WorkspaceID: "workspace", UserID: "actor", RoleKey: "member",
+		Known: true, WorkspaceID: "workspace", UserID: "actor", RoleKey: "member", AccessBundle: bundle,
 	}})
 	return request.WithContext(ctx)
 }
@@ -80,7 +106,7 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	if err := modulehttp.ValidateSurface(surface); err != nil {
 		t.Fatal(err)
 	}
-	if routes := surface.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticatedPrincipal || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
+	if routes := surface.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
 		t.Fatalf("routes=%+v", routes)
 	}
 	if operations := surface.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
@@ -114,6 +140,39 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1/download?provider=records&operation=export"))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("non-terminal download status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSurfaceRequiresFunctionAndDataPolicyForSameExactKey(t *testing.T) {
+	surface, err := NewSurface(&bindingProbe{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		permissions []string
+	}{
+		{name: "missing function and data"},
+		{name: "different exact key", permissions: []string{dataexchange.ActionDataExchangeJobDownload}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			surface.Handler().ServeHTTP(response, requestWithPermissions(http.MethodGet, "/data-exchange/jobs/job-1", test.permissions...))
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "backend.data_exchange.job_permission_denied") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	request := requestWithPermissions(http.MethodGet, "/data-exchange/jobs/job-1", dataexchange.ActionDataExchangeJobGet)
+	identity, _ := identitysdk.RequestIdentityFromContext(request.Context())
+	identity.Principal.AccessBundle.DataPolicies = nil
+	request = request.WithContext(identitysdk.WithRequestIdentity(request.Context(), identity))
+	response := httptest.NewRecorder()
+	surface.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("function-only status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -275,9 +275,13 @@ func (s *Store) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, 
 	j, e := scanJob(s.db.QueryRowContext(ctx, queryValue, args...))
 	return j, e == nil
 }
-func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest, access dataexchangemodel.JobAccess) (dataexchange.Job, error) {
+	access = access.Normalized()
+	if !jobAccessMatchesScope(r, access) {
+		return dataexchange.Job{}, dataexchange.ErrJobNotFound
+	}
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(jobAccessPredicate(r)).Build()
+	queryValue, args, err := s.jobSelect(r, access, false).Build()
 	if err != nil {
 		return dataexchange.Job{}, err
 	}
@@ -287,45 +291,95 @@ func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchang
 	}
 	return job, err
 }
-func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest, access dataexchangemodel.JobAccess) (dataexchange.Job, error) {
+	access = access.Normalized()
+	if !jobAccessMatchesScope(r, access) {
+		return dataexchange.Job{}, dataexchange.ErrJobNotFound
+	}
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(query.And(
-		jobAccessPredicate(r), query.In("status", "queued", "running"),
-	))
-	if _, e := execute(ctx, s.db, update); e != nil {
-		return dataexchange.Job{}, e
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return dataexchange.Job{}, err
 	}
-	return s.Job(ctx, r)
+	defer tx.Rollback()
+
+	selectQuery, selectArgs, err := s.jobSelect(r, access, true).Build()
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	selected, err := scanJob(tx.QueryRowContext(ctx, selectQuery, selectArgs...))
+	if errors.Is(err, sql.ErrNoRows) {
+		return dataexchange.Job{}, dataexchange.ErrJobNotFound
+	}
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	if selected.Status == "queued" || selected.Status == "running" {
+		update := query.NewWorkspaceUpdateBuilder(s.renderer, "_data_exchange_jobs", access.WorkspaceID).
+			Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).
+			Where(query.And(jobCandidatePredicate(r, access, ""), query.In("status", "queued", "running")))
+		result, updateErr := execute(ctx, tx, update)
+		if updateErr != nil {
+			return dataexchange.Job{}, updateErr
+		}
+		updated, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return dataexchange.Job{}, rowsErr
+		}
+		if updated != 1 {
+			return dataexchange.Job{}, dataexchange.ErrJobNotFound
+		}
+	}
+	readQuery, readArgs, err := s.jobSelect(r, access, false).Build()
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	job, err := scanJob(tx.QueryRowContext(ctx, readQuery, readArgs...))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return dataexchange.Job{}, dataexchange.ErrJobNotFound
+		}
+		return dataexchange.Job{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return dataexchange.Job{}, err
+	}
+	return job, nil
 }
 
-func jobAccessPredicate(r dataexchange.JobRequest) query.Predicate {
+func (s *Store) jobSelect(r dataexchange.JobRequest, access dataexchangemodel.JobAccess, lock bool) *query.SelectBuilder {
+	selectBuilder := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_jobs", access.WorkspaceID).
+		Columns(jobColumns...).Where(jobCandidatePredicate(r, access, ""))
+	if lock && s.engine.Capabilities().RowLock {
+		selectBuilder.ForUpdate()
+	}
+	return selectBuilder
+}
+
+func jobCandidatePredicate(r dataexchange.JobRequest, access dataexchangemodel.JobAccess, alias string) query.Predicate {
 	predicates := []query.Predicate{
-		query.Equal("id", strings.TrimSpace(r.JobID)),
-		query.Equal("workspace_id", strings.TrimSpace(r.Scope.WorkspaceID)),
-		query.Equal("actor_id", strings.TrimSpace(r.Scope.ActorID)),
+		columnEqual(alias, "id", strings.TrimSpace(r.JobID)),
+		columnEqual(alias, "actor_id", access.OwnerActorID),
 	}
 	if provider := strings.TrimSpace(r.Provider); provider != "" {
-		predicates = append(predicates, query.Equal("provider", provider))
+		predicates = append(predicates, columnEqual(alias, "provider", provider))
 	}
 	if operation := strings.TrimSpace(r.Operation); operation != "" {
-		predicates = append(predicates, query.Equal("operation", operation))
+		predicates = append(predicates, columnEqual(alias, "operation", operation))
 	}
 	return query.And(predicates...)
 }
 
-func qualifiedJobAccessPredicate(alias string, r dataexchange.JobRequest) query.Predicate {
-	predicates := []query.Predicate{
-		query.EqualValue(query.QualifiedColumn(alias, "id"), strings.TrimSpace(r.JobID)),
-		query.EqualValue(query.QualifiedColumn(alias, "workspace_id"), strings.TrimSpace(r.Scope.WorkspaceID)),
-		query.EqualValue(query.QualifiedColumn(alias, "actor_id"), strings.TrimSpace(r.Scope.ActorID)),
+func jobAccessMatchesScope(r dataexchange.JobRequest, access dataexchangemodel.JobAccess) bool {
+	return access.WorkspaceID != "" && access.OwnerActorID != "" &&
+		access.WorkspaceID == strings.TrimSpace(r.Scope.WorkspaceID) && access.OwnerActorID == strings.TrimSpace(r.Scope.ActorID)
+}
+
+func columnEqual(alias, column string, value any) query.Predicate {
+	if alias == "" {
+		return query.Equal(column, value)
 	}
-	if provider := strings.TrimSpace(r.Provider); provider != "" {
-		predicates = append(predicates, query.EqualValue(query.QualifiedColumn(alias, "provider"), provider))
-	}
-	if operation := strings.TrimSpace(r.Operation); operation != "" {
-		predicates = append(predicates, query.EqualValue(query.QualifiedColumn(alias, "operation"), operation))
-	}
-	return query.And(predicates...)
+	return query.EqualValue(query.QualifiedColumn(alias, column), value)
 }
 
 func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
@@ -571,16 +625,23 @@ func (s *Store) Heartbeat(ctx context.Context, x dataexchangemodel.WorkItem, ttl
 	}
 	return nil
 }
-func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Artifact, error) {
+func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest, access dataexchangemodel.JobAccess) (dataexchange.Artifact, error) {
+	access = access.Normalized()
+	if !jobAccessMatchesScope(r, access) {
+		return dataexchange.Artifact{}, dataexchange.ErrJobNotFound
+	}
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	var a dataexchange.Artifact
 	var expiresAt string
-	queryValue, args, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_artifacts").Alias("a").Projections(
+	queryValue, args, buildErr := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_artifacts", access.WorkspaceID).Alias("a").Projections(
 		query.Project(query.QualifiedColumn("a", "id")), query.Project(query.QualifiedColumn("a", "filename")),
 		query.Project(query.QualifiedColumn("a", "content_type")), query.Project(query.QualifiedColumn("a", "content_sha256")),
 		query.Project(query.QualifiedColumn("a", "size_bytes")), query.Project(query.QualifiedColumn("a", "expires_at")),
-	).Join(query.InnerJoin("_data_exchange_jobs", "j", query.EqualExpressions(query.QualifiedColumn("j", "id"), query.QualifiedColumn("a", "job_id")))).Where(query.And(
-		qualifiedJobAccessPredicate("j", r), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
+	).Join(query.InnerJoin("_data_exchange_jobs", "j", query.And(
+		query.EqualExpressions(query.QualifiedColumn("j", "id"), query.QualifiedColumn("a", "job_id")),
+		query.EqualExpressions(query.QualifiedColumn("j", "workspace_id"), query.QualifiedColumn("a", "workspace_id")),
+	))).Where(query.And(
+		jobCandidatePredicate(r, access, "j"), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
 	)).Build()
 	if buildErr != nil {
 		return a, buildErr
