@@ -22,7 +22,7 @@ import (
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
 
-type surface struct {
+type adapter struct {
 	binding jobBinding
 	host    modulehost.Host
 	mux     *http.ServeMux
@@ -39,23 +39,23 @@ type actionScopedJobBinding interface {
 	JobForAction(context.Context, dataexchange.JobRequest, string) (dataexchange.Job, error)
 }
 
-func (*surface) ContractVersion() string { return modulehttp.ContractVersion }
-func (*surface) Owner() string           { return dataexchange.DataExchangeHTTPSurfaceContract().Owner }
-func (*surface) Name() string            { return dataexchange.DataExchangeHTTPSurfaceContract().Name }
-func (s *surface) Handler() http.Handler { return s.mux }
-func (s *surface) Routes() []modulehttp.Route {
+func (*adapter) ContractVersion() string { return modulehttp.ContractVersion }
+func (*adapter) Owner() string           { return dataexchange.DataExchangeHTTPAdapterContract().Owner }
+func (*adapter) Name() string            { return dataexchange.DataExchangeHTTPAdapterContract().Name }
+func (s *adapter) Handler() http.Handler { return s.mux }
+func (s *adapter) Routes() []modulehttp.Route {
 	return append([]modulehttp.Route(nil), s.routes...)
 }
 
-func (s *surface) OpenAPIOperations() map[string]map[string]any {
-	return dataexchange.DataExchangeHTTPSurfaceContract().OpenAPIOperations()
+func (s *adapter) OpenAPIOperations() map[string]map[string]any {
+	return dataexchange.DataExchangeHTTPAdapterContract().OpenAPIOperations()
 }
 
-func NewSurface(binding jobBinding, host modulehost.Host) (modulehttp.Surface, error) {
+func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, error) {
 	if binding == nil {
 		return nil, errors.New("Data Exchange HTTP binding is unavailable")
 	}
-	s := &surface{binding: binding, host: host, mux: http.NewServeMux()}
+	s := &adapter{binding: binding, host: host, mux: http.NewServeMux()}
 	var err error
 	s.routes, err = dataExchangeRoutes()
 	if err != nil {
@@ -95,7 +95,7 @@ func NewSurface(binding jobBinding, host modulehost.Host) (modulehttp.Surface, e
 }
 
 func dataExchangeRoutes() ([]modulehttp.Route, error) {
-	contract := dataexchange.DataExchangeHTTPSurfaceContract()
+	contract := dataexchange.DataExchangeHTTPAdapterContract()
 	routes := make([]modulehttp.Route, 0, len(contract.Routes))
 	for _, declared := range contract.Routes {
 		action, err := exactPermissionAction(declared.Action)
@@ -132,7 +132,7 @@ func exactPermissionAction(action actioncontract.ActionDefinition) (actioncontra
 // capability projection without exposing the HTTP handler implementation.
 func CapabilityRoutes() ([]modulehttp.Route, error) { return dataExchangeRoutes() }
 
-func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
+func (s *adapter) getJob(response http.ResponseWriter, request *http.Request) {
 	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobGet)
 	if !ok {
 		return
@@ -150,7 +150,7 @@ func (s *surface) getJob(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, projection)
 }
 
-func (s *surface) cancelJob(response http.ResponseWriter, request *http.Request) {
+func (s *adapter) cancelJob(response http.ResponseWriter, request *http.Request) {
 	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobCancel)
 	if !ok {
 		return
@@ -168,7 +168,7 @@ func (s *surface) cancelJob(response http.ResponseWriter, request *http.Request)
 	writeJSON(response, http.StatusOK, projection)
 }
 
-func (s *surface) downloadJob(response http.ResponseWriter, request *http.Request) {
+func (s *adapter) downloadJob(response http.ResponseWriter, request *http.Request) {
 	jobRequest, ok := httpJobRequest(response, request, dataexchange.ActionDataExchangeJobDownload)
 	if !ok {
 		return
@@ -220,7 +220,7 @@ func (s *surface) downloadJob(response http.ResponseWriter, request *http.Reques
 	_, _ = io.Copy(response, artifact.Content)
 }
 
-func (s *surface) openArtifact(request *http.Request, job dataexchange.Job, scope dataexchange.Scope) (dataexchange.Artifact, error) {
+func (s *adapter) openArtifact(request *http.Request, job dataexchange.Job, scope dataexchange.Scope) (dataexchange.Artifact, error) {
 	if s.host != nil && job.Operation == "export" {
 		provider, found := s.host.ExportProvider(job.Provider)
 		if !found {
@@ -235,7 +235,7 @@ func (s *surface) openArtifact(request *http.Request, job dataexchange.Job, scop
 	})
 }
 
-func (s *surface) projectJob(request *http.Request, job dataexchange.Job, scope dataexchange.Scope) (any, error) {
+func (s *adapter) projectJob(request *http.Request, job dataexchange.Job, scope dataexchange.Scope) (any, error) {
 	if s.host != nil {
 		var provider any
 		var found bool
@@ -336,5 +336,5 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(response).Encode(value)
 }
 
-var _ modulehttp.Surface = (*surface)(nil)
-var _ modulehttp.OpenAPIProvider = (*surface)(nil)
+var _ modulehttp.Adapter = (*adapter)(nil)
+var _ modulehttp.OpenAPIProvider = (*adapter)(nil)

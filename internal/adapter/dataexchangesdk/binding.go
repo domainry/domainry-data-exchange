@@ -17,7 +17,7 @@ import (
 // SDK-facing type while orchestration remains in the application layer.
 type Binding struct {
 	*dataexchangeapplication.Service
-	surfaces   []modulehttp.Surface
+	adapters   []modulehttp.Adapter
 	capability modulecapability.Binding
 }
 
@@ -48,12 +48,12 @@ func (b *Binding) ValidateCapabilityCandidate(ctx context.Context, request modul
 	return b.capability.ValidateCapabilityCandidate(ctx, request)
 }
 
-func (b *Binding) SetHTTPSurfaces(surfaces []modulehttp.Surface) {
-	b.surfaces = append([]modulehttp.Surface(nil), surfaces...)
+func (b *Binding) SetHTTPAdapters(adapters []modulehttp.Adapter) {
+	b.adapters = append([]modulehttp.Adapter(nil), adapters...)
 }
 
-func (b *Binding) HTTPSurfaces() []modulehttp.Surface {
-	return append([]modulehttp.Surface(nil), b.surfaces...)
+func (b *Binding) HTTPAdapters() []modulehttp.Adapter {
+	return append([]modulehttp.Adapter(nil), b.adapters...)
 }
 
 var _ dataexchange.Binding = (*Binding)(nil)

@@ -99,22 +99,22 @@ func requestWithPermissions(method, target string, permissions ...string) *http.
 
 func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	probe := &bindingProbe{}
-	surface, err := NewSurface(probe, nil)
+	adapter, err := NewAdapter(probe, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := modulehttp.ValidateSurface(surface); err != nil {
+	if err := modulehttp.ValidateAdapter(adapter); err != nil {
 		t.Fatal(err)
 	}
-	if routes := surface.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
+	if routes := adapter.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
 		t.Fatalf("routes=%+v", routes)
 	}
-	if operations := surface.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
+	if operations := adapter.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
 		t.Fatalf("OpenAPI operations=%#v", operations)
 	}
 
 	response := httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -126,25 +126,25 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	}
 
 	response = httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodPost, "/data-exchange/jobs/job-1/cancel"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodPost, "/data-exchange/jobs/job-1/cancel"))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"cancelled"`) {
 		t.Fatalf("cancel status=%d body=%s", response.Code, response.Body.String())
 	}
 
 	response = httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))
 	if response.Code != http.StatusOK || response.Body.String() != "name\nAcme\n" || response.Header().Get("Content-Disposition") != "attachment; filename=contacts.csv" {
 		t.Fatalf("download status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
 	response = httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1/download?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1/download?provider=records&operation=export"))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("non-terminal download status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
 func TestSurfaceRequiresFunctionAndDataPolicyForSameExactKey(t *testing.T) {
-	surface, err := NewSurface(&bindingProbe{}, nil)
+	adapter, err := NewAdapter(&bindingProbe{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestSurfaceRequiresFunctionAndDataPolicyForSameExactKey(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			surface.Handler().ServeHTTP(response, requestWithPermissions(http.MethodGet, "/data-exchange/jobs/job-1", test.permissions...))
+			adapter.Handler().ServeHTTP(response, requestWithPermissions(http.MethodGet, "/data-exchange/jobs/job-1", test.permissions...))
 			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "backend.data_exchange.job_permission_denied") {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
@@ -170,24 +170,24 @@ func TestSurfaceRequiresFunctionAndDataPolicyForSameExactKey(t *testing.T) {
 	identity.Principal.AccessBundle.DataPolicies = nil
 	request = request.WithContext(identitysdk.WithRequestIdentity(request.Context(), identity))
 	response := httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, request)
+	adapter.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("function-only status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
 func TestSurfaceFailsClosedForMissingIdentityAndJob(t *testing.T) {
-	surface, err := NewSurface(&bindingProbe{}, nil)
+	adapter, err := NewAdapter(&bindingProbe{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/job-1", nil))
+	adapter.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/job-1", nil))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous status=%d", response.Code)
 	}
 	response = httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/missing"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/missing"))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -213,28 +213,28 @@ func (projectingProvider) OpenDataExchangeArtifact(_ context.Context, _ dataexch
 }
 
 func TestSurfaceUsesProviderOwnedJobProjection(t *testing.T) {
-	surface, err := NewSurface(&bindingProbe{}, &projectingHost{})
+	adapter, err := NewAdapter(&bindingProbe{}, &projectingHost{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"legacy_status":"running"`) || !strings.Contains(response.Body.String(), `"actor":"actor"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()
-	surface.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))
 	if response.Code != http.StatusOK || response.Body.String() != "provider\n" || response.Header().Get("Content-Disposition") != "attachment; filename=provider.csv" {
 		t.Fatalf("provider download status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
 }
 
 func TestSurfaceFailsClosedWhenExportProviderIsUnavailable(t *testing.T) {
-	ownedSurface, err := NewSurface(&bindingProbe{}, &projectingHost{})
+	ownedAdapter, err := NewAdapter(&bindingProbe{}, &projectingHost{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := ownedSurface.(*surface)
+	host := ownedAdapter.(*adapter)
 	host.host = missingProviderHost{}
 	response := httptest.NewRecorder()
 	host.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))

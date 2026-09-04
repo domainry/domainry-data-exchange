@@ -52,11 +52,11 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 		return nil, fmt.Errorf("build Data Exchange capability disclosure: %w", err)
 	}
 	binding := dataexchangesdkadapter.NewBinding(application, host, store, capabilityBinding)
-	surface, err := modulehttptransport.NewSurface(binding, host)
+	adapter, err := modulehttptransport.NewAdapter(binding, host)
 	if err != nil {
 		return nil, err
 	}
-	binding.SetHTTPSurfaces([]modulehttp.Surface{surface})
+	binding.SetHTTPAdapters([]modulehttp.Adapter{adapter})
 	return binding, nil
 }
 

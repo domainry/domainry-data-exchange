@@ -92,8 +92,8 @@ func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 		t.Fatal("Remote Binding replaced or buffered source reader")
 	}
 	provider, ok := binding.(modulehttp.Provider)
-	if !ok || len(provider.HTTPSurfaces()) != 1 {
-		t.Fatal("Data Exchange SaaS binding does not expose the owner HTTP surface")
+	if !ok || len(provider.HTTPAdapters()) != 1 {
+		t.Fatal("Data Exchange SaaS binding does not expose the owner HTTP adapter")
 	}
 }
 

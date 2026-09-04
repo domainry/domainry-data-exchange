@@ -157,6 +157,7 @@ func openTestBinding(t *testing.T) (dataexchange.Binding, *testImportProvider, *
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	ip := &testImportProvider{}
 	ep := &testExportProvider{}
@@ -174,6 +175,7 @@ func openArtifactTestBinding(t *testing.T) (dataexchange.Binding, *testArtifactI
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	imports := &testArtifactImportProvider{}
 	exports := &testArtifactExportProvider{}
@@ -191,6 +193,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	imports := &testArtifactImportProvider{}
 	exports := &testArtifactExportProvider{}
@@ -219,6 +222,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
 	engine, err := persistenceengine.NewEngine("sqlite")
@@ -299,17 +303,17 @@ func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
 	}
 }
 
-func TestModuleBindingExposesOwnedHTTPSurface(t *testing.T) {
+func TestModuleBindingExposesOwnedHTTPAdapter(t *testing.T) {
 	binding, _, _ := openTestBinding(t)
 	provider, ok := binding.(modulehttp.Provider)
 	if !ok {
-		t.Fatal("Data Exchange Module binding does not expose HTTP surfaces")
+		t.Fatal("Data Exchange Module binding does not expose HTTP adapters")
 	}
-	surfaces := provider.HTTPSurfaces()
-	if len(surfaces) != 1 {
-		t.Fatalf("surfaces=%d", len(surfaces))
+	adapters := provider.HTTPAdapters()
+	if len(adapters) != 1 {
+		t.Fatalf("adapters=%d", len(adapters))
 	}
-	if err := modulehttp.ValidateSurface(surfaces[0]); err != nil {
+	if err := modulehttp.ValidateAdapter(adapters[0]); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -49,12 +49,12 @@ func (f Factory) OpenSaaS(ctx context.Context, app dataexchange.ApplicationRef, 
 		return nil, fmt.Errorf("connect Data Exchange SaaS provider bridge: %w", err)
 	}
 	result := &binding{application: app, transport: f.transport, descriptor: descriptor}
-	surface, err := modulehttptransport.NewSurface(result, host)
+	adapter, err := modulehttptransport.NewAdapter(result, host)
 	if err != nil {
 		_ = f.transport.Close(context.WithoutCancel(ctx), app)
 		return nil, err
 	}
-	result.surfaces = []modulehttp.Surface{surface}
+	result.adapters = []modulehttp.Adapter{adapter}
 	return result, nil
 }
 
@@ -62,7 +62,7 @@ type binding struct {
 	application dataexchange.ApplicationRef
 	transport   saashost.Transport
 	descriptor  dataexchange.Descriptor
-	surfaces    []modulehttp.Surface
+	adapters    []modulehttp.Adapter
 	closeOnce   sync.Once
 }
 
@@ -76,8 +76,8 @@ func (b *binding) CapabilityCategory(ctx context.Context, key string) (modulecap
 func (b *binding) ValidateCapabilityCandidate(ctx context.Context, request modulecapability.ValidationRequest) (modulecapability.ValidationResult, error) {
 	return b.transport.ValidateCapabilityCandidate(ctx, request)
 }
-func (b *binding) HTTPSurfaces() []modulehttp.Surface {
-	return append([]modulehttp.Surface(nil), b.surfaces...)
+func (b *binding) HTTPAdapters() []modulehttp.Adapter {
+	return append([]modulehttp.Adapter(nil), b.adapters...)
 }
 func (b *binding) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	return b.transport.SubmitImport(ctx, b.application, r)

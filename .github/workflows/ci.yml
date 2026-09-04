@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  GOPRIVATE: github.com/domainry/*
+  GONOSUMDB: github.com/domainry/*
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure access to Domainry modules
+        env:
+          DOMAINRY_MODULE_TOKEN: ${{ secrets.DOMAINRY_GITHUB_TOKEN || github.token }}
+        run: git config --global url."https://x-access-token:${DOMAINRY_MODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Unit and SQLite integration tests
+        run: go test -count=1 ./...
+
+      - name: Race-sensitive integration tests
+        run: >-
+          go test -race -count=1
+          ./module
+          ./remote
+          ./internal/capability
+          ./internal/domain/dataexchange/service
+          ./internal/infrastructure/persistence/database/dataexchange
+          ./internal/transport/http/module

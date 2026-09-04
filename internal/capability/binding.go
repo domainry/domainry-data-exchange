@@ -38,7 +38,7 @@ type JobSelectorCandidate struct {
 }
 
 func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
-	contract := dataexchange.DataExchangeHTTPSurfaceContract()
+	contract := dataexchange.DataExchangeHTTPAdapterContract()
 	routes, err := modulehttptransport.CapabilityRoutes()
 	if err != nil {
 		return nil, fmt.Errorf("project Data Exchange capability routes: %w", err)

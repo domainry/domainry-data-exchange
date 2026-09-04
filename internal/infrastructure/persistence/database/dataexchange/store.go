@@ -577,7 +577,8 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 		}
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
-		Set("lease_owner", "").Set("lease_expires_at", "").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
+		Set("error_code", "").Set("next_attempt_at", "").Set("lease_owner", "").Set("lease_expires_at", "").
+		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
 	result, e := execute(ctx, tx, update)
 	if e != nil {
 		return e
