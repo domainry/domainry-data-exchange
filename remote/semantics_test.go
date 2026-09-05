@@ -127,7 +127,7 @@ func remoteRequest(method, target string, permission string) *http.Request {
 		Subject:         identitysdk.Subject{WorkspaceID: "workspace", SubjectID: "actor"},
 		FunctionGrants:  []identitysdk.FunctionGrant{{Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow}},
 		DataPolicies: []identitysdk.DataPolicy{{
-			Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
+			Key: "data-" + permission + "-0", Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
 			DataScopes: []identitysdk.DataScope{identitysdk.DataScopeOwner}, Predicate: identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"},
 		}},
 	}

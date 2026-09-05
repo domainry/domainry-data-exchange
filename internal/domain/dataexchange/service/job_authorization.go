@@ -32,7 +32,11 @@ func ResolveJobAccess(ctx context.Context, request dataexchange.JobRequest, perm
 
 	matchedAllow := false
 	for _, policy := range principal.AccessBundle.DataPolicies {
-		if strings.TrimSpace(policy.Key) != permissionKey || strings.TrimSpace(string(policy.Resource)) != resource || strings.TrimSpace(string(policy.Action)) != action {
+		// DataPolicy.Key identifies the compiled policy instance (Identity emits
+		// keys such as "data-data_exchange.jobs.get-0"). The permission subject
+		// is the exact Resource/Action pair, so do not confuse the instance key
+		// with the canonical Permission key.
+		if strings.TrimSpace(string(policy.Resource)) != resource || strings.TrimSpace(string(policy.Action)) != action {
 			continue
 		}
 		if policy.Effect != identitysdk.EffectAllow || len(policy.DataScopes) != 1 || policy.DataScopes[0] != identitysdk.DataScopeOwner || !isOwnerPredicate(policy.Predicate) {

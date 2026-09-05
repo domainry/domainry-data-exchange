@@ -58,6 +58,18 @@ func (b *Service) SubmitExport(ctx context.Context, r dataexchange.ExportRequest
 	}
 	return b.store.SubmitExport(ctx, r)
 }
+func (b *Service) Jobs(ctx context.Context, r dataexchange.JobListRequest) ([]dataexchange.Job, error) {
+	if e := r.Validate(); e != nil {
+		return nil, e
+	}
+	access, err := dataexchangeservice.ResolveJobAccess(ctx, dataexchange.JobRequest{
+		Scope: r.Scope, JobID: "list", Provider: r.Provider, Operation: r.Operation,
+	}, dataexchange.ActionDataExchangeJobList)
+	if err != nil {
+		return nil, err
+	}
+	return b.store.Jobs(ctx, r, access)
+}
 func (b *Service) Job(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
 	return b.JobForAction(ctx, r, dataexchange.ActionDataExchangeJobGet)
 }

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -270,7 +272,7 @@ func jobAuthorizedContext(ctx context.Context, scope dataexchange.Scope, permiss
 		resource, action := permission[:separator], permission[separator+1:]
 		bundle.FunctionGrants = append(bundle.FunctionGrants, identitysdk.FunctionGrant{Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow})
 		bundle.DataPolicies = append(bundle.DataPolicies, identitysdk.DataPolicy{
-			Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
+			Key: "data-" + permission + "-" + strconv.Itoa(len(bundle.DataPolicies)), Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
 			DataScopes: []identitysdk.DataScope{identitysdk.DataScopeOwner}, Predicate: identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"},
 		})
 	}
@@ -374,6 +376,98 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	defer provider.mu.Unlock()
 	if len(provider.completions) != 1 || provider.completions[0].Artifact.SHA256 != artifact.SHA256 || provider.completions[0].Rows != 2 || provider.completions[0].ReferenceID != "audit-1" {
 		t.Fatalf("completions=%+v", provider.completions)
+	}
+}
+
+func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "report-export.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{}, exports: map[string]modulehost.ExportProvider{"reports": &testExportProvider{}}}
+	binding, err := NewFactory(Options{}).OpenModule(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpProvider, ok := binding.(modulehttp.Provider)
+	if !ok || len(httpProvider.HTTPAdapters()) != 1 {
+		t.Fatal("module binding did not expose its HTTP adapter")
+	}
+	adapter := httpProvider.HTTPAdapters()[0]
+	owner := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "director-user-id", RoleKey: "sales_director"}
+	job, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{
+		Scope: owner, Provider: "reports", ObjectKey: "lead", IdempotencyKey: "report-export-owner", ReferenceID: "audit-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
+	response := httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "backend.data_exchange.result_not_ready") {
+		t.Fatalf("queued download status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
+	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
+	completed := waitCompleted(t, binding, owner, job.ID)
+	if completed.Status != "completed" || completed.Provider != "reports" || completed.Operation != "export" || completed.ActorID != owner.ActorID || completed.ArtifactID == "" {
+		t.Fatalf("completed Report job=%+v", completed)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"?provider=reports&operation=export", nil)
+	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobGet))
+	response = httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"completed"`) || strings.Contains(response.Body.String(), "actor_id") {
+		t.Fatalf("owner get status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
+	response = httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "id,name\n1,one\n2,two\n" {
+		t.Fatalf("owner download status=%d body=%q", response.Code, response.Body.String())
+	}
+
+	peer := dataexchange.Scope{WorkspaceID: owner.WorkspaceID, ActorID: "other-user-id", RoleKey: owner.RoleKey}
+	for _, endpoint := range []struct {
+		path, permission string
+	}{
+		{path: "/data-exchange/jobs/" + job.ID + "?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobGet},
+		{path: "/data-exchange/jobs/" + job.ID + "/download?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobDownload},
+	} {
+		request = httptest.NewRequest(http.MethodGet, endpoint.path, nil)
+		request = request.WithContext(jobAuthorizedContext(request.Context(), peer, endpoint.permission))
+		response = httptest.NewRecorder()
+		adapter.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("cross-requester %s status=%d body=%s", endpoint.permission, response.Code, response.Body.String())
+		}
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"?provider=reports&operation=export", nil)
+	request = request.WithContext(jobAuthorizedContext(request.Context(), owner))
+	response = httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "backend.data_exchange.job_permission_denied") {
+		t.Fatalf("missing-grant get status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
+	response = httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "backend.data_exchange.artifact_expired") {
+		t.Fatalf("expired download status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

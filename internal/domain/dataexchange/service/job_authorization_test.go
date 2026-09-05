@@ -46,8 +46,8 @@ func TestResolveJobAccessUsesOnlySameExactPermissionOwnerScope(t *testing.T) {
 		name   string
 		mutate func(*identitysdk.AccessBundle)
 	}{
-		{name: "different policy key", mutate: func(bundle *identitysdk.AccessBundle) {
-			bundle.DataPolicies[0].Key = "data_exchange.jobs.other"
+		{name: "different policy resource", mutate: func(bundle *identitysdk.AccessBundle) {
+			bundle.DataPolicies[0].Resource = "data_exchange.other"
 		}},
 		{name: "owner with wrong predicate", mutate: func(bundle *identitysdk.AccessBundle) {
 			bundle.DataPolicies[0].Predicate = identitysdk.Predicate{Fact: "owner_org_id", Operator: identitysdk.OperatorEqual, Value: "$subject.org_id"}
@@ -60,6 +60,34 @@ func TestResolveJobAccessUsesOnlySameExactPermissionOwnerScope(t *testing.T) {
 			ctx := authorizationContext(authorizationSubject(), dataexchange.ActionDataExchangeJobGet, identitysdk.DataScopeOwner, true, true)
 			identity, _ := identitysdk.RequestIdentityFromContext(ctx)
 			test.mutate(identity.Principal.AccessBundle)
+			ctx = identitysdk.WithRequestIdentity(ctx, identity)
+			if _, err := ResolveJobAccess(ctx, request, dataexchange.ActionDataExchangeJobGet); apperror.KindOf(err) != apperror.KindForbidden {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestResolveJobAccessRejectsMixedPrincipalIdentityTypes(t *testing.T) {
+	request := dataexchange.JobRequest{Scope: dataexchange.Scope{WorkspaceID: "workspace", ActorID: "user-1"}, JobID: "job-1"}
+	for _, test := range []struct {
+		name   string
+		mutate func(*identitysdk.Principal)
+	}{
+		{name: "principal user differs from requester", mutate: func(principal *identitysdk.Principal) {
+			principal.UserID = "member-1"
+		}},
+		{name: "bundle subject differs from requester", mutate: func(principal *identitysdk.Principal) {
+			principal.AccessBundle.Subject.SubjectID = "account-1"
+		}},
+		{name: "bundle workspace differs from principal", mutate: func(principal *identitysdk.Principal) {
+			principal.AccessBundle.Subject.WorkspaceID = "workspace-other"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := authorizationContext(identitysdk.Subject{WorkspaceID: "workspace", SubjectID: "user-1"}, dataexchange.ActionDataExchangeJobGet, identitysdk.DataScopeOwner, true, true)
+			identity, _ := identitysdk.RequestIdentityFromContext(ctx)
+			test.mutate(&identity.Principal)
 			ctx = identitysdk.WithRequestIdentity(ctx, identity)
 			if _, err := ResolveJobAccess(ctx, request, dataexchange.ActionDataExchangeJobGet); apperror.KindOf(err) != apperror.KindForbidden {
 				t.Fatalf("error=%v", err)
@@ -83,7 +111,7 @@ func authorizationContext(subject identitysdk.Subject, permission string, scope 
 		if scope == identitysdk.DataScopeOwner {
 			predicate = identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"}
 		}
-		bundle.DataPolicies = []identitysdk.DataPolicy{{Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow, DataScopes: []identitysdk.DataScope{scope}, Predicate: predicate}}
+		bundle.DataPolicies = []identitysdk.DataPolicy{{Key: "data-" + permission + "-0", Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow, DataScopes: []identitysdk.DataScope{scope}, Predicate: predicate}}
 	}
 	return identitysdk.WithRequestIdentity(context.Background(), identitysdk.RequestIdentity{Principal: identitysdk.Principal{
 		Known: true, WorkspaceID: string(subject.WorkspaceID), UserID: string(subject.SubjectID), AccessBundle: bundle,

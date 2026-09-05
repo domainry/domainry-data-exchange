@@ -13,6 +13,7 @@ import (
 type JobRepository interface {
 	SubmitImport(context.Context, dataexchange.ImportRequest) (dataexchange.Job, bool, error)
 	SubmitExport(context.Context, dataexchange.ExportRequest) (dataexchange.Job, bool, error)
+	Jobs(context.Context, dataexchange.JobListRequest, model.JobAccess) ([]dataexchange.Job, error)
 	Job(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Job, error)
 	Cancel(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Job, error)
 	Artifact(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Artifact, error)

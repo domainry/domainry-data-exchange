@@ -17,7 +17,8 @@ import (
 )
 
 type bindingProbe struct {
-	last dataexchange.JobRequest
+	last     dataexchange.JobRequest
+	lastList dataexchange.JobListRequest
 }
 
 func (*bindingProbe) Descriptor() dataexchange.Descriptor { return dataexchange.Descriptor{} }
@@ -33,6 +34,10 @@ func (p *bindingProbe) Job(_ context.Context, request dataexchange.JobRequest) (
 		return dataexchange.Job{}, dataexchange.ErrJobNotFound
 	}
 	return probeJob(request), nil
+}
+func (p *bindingProbe) Jobs(_ context.Context, request dataexchange.JobListRequest) ([]dataexchange.Job, error) {
+	p.lastList = request
+	return []dataexchange.Job{probeJob(dataexchange.JobRequest{Scope: request.Scope, JobID: "job-1", Provider: request.Provider, Operation: request.Operation})}, nil
 }
 func (p *bindingProbe) Cancel(_ context.Context, request dataexchange.JobRequest) (dataexchange.Job, error) {
 	p.last = request
@@ -56,8 +61,12 @@ func probeJob(request dataexchange.JobRequest) dataexchange.Job {
 	if request.JobID == "completed" {
 		status = "completed"
 	}
+	provider := request.Provider
+	if provider == "" {
+		provider = "records"
+	}
 	return dataexchange.Job{
-		ID: request.JobID, Provider: "records", Operation: "export", Status: status, ObjectKey: "contact",
+		ID: request.JobID, Provider: provider, Operation: "export", Status: status, ObjectKey: "contact",
 		WorkspaceID: request.Scope.WorkspaceID, ActorID: request.Scope.ActorID, Options: []byte("secret"), LeaseOwner: "worker-secret",
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -65,7 +74,9 @@ func probeJob(request dataexchange.JobRequest) dataexchange.Job {
 
 func authenticatedRequest(method, target string) *http.Request {
 	permission := dataexchange.ActionDataExchangeJobGet
-	if method == http.MethodPost && strings.Contains(target, "/cancel") {
+	if method == http.MethodGet && strings.TrimPrefix(target, "http://example.com") == "/data-exchange/jobs" {
+		permission = dataexchange.ActionDataExchangeJobList
+	} else if method == http.MethodPost && strings.Contains(target, "/cancel") {
 		permission = dataexchange.ActionDataExchangeJobCancel
 	} else if strings.Contains(target, "/download") {
 		permission = dataexchange.ActionDataExchangeJobDownload
@@ -87,7 +98,7 @@ func requestWithPermissions(method, target string, permissions ...string) *http.
 		resource, action := permission[:separator], permission[separator+1:]
 		bundle.FunctionGrants = append(bundle.FunctionGrants, identitysdk.FunctionGrant{Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow})
 		bundle.DataPolicies = append(bundle.DataPolicies, identitysdk.DataPolicy{
-			Key: permission, Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
+			Key: "data-" + permission + "-0", Resource: identitysdk.ResourceType(resource), Action: identitysdk.Action(action), Effect: identitysdk.EffectAllow,
 			DataScopes: []identitysdk.DataScope{identitysdk.DataScopeOwner}, Predicate: identitysdk.Predicate{Fact: "owner_user_id", Operator: identitysdk.OperatorEqual, Value: "$subject.id"},
 		})
 	}
@@ -106,14 +117,19 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	if err := modulehttp.ValidateAdapter(adapter); err != nil {
 		t.Fatal(err)
 	}
-	if routes := adapter.Routes(); len(routes) != 3 || routes[0].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[1].Action.IdempotencyDecision != "natural_key" || routes[2].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
+	if routes := adapter.Routes(); len(routes) != 4 || routes[0].Pattern() != "GET /data-exchange/jobs" || routes[1].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[2].Action.IdempotencyDecision != "natural_key" || routes[3].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
 		t.Fatalf("routes=%+v", routes)
 	}
 	if operations := adapter.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
 		t.Fatalf("OpenAPI operations=%#v", operations)
 	}
-
 	response := httptest.NewRecorder()
+	adapter.Handler().ServeHTTP(response, requestWithPermissions(http.MethodGet, "/data-exchange/jobs?provider=records&operation=export&status=completed&limit=20", dataexchange.ActionDataExchangeJobList))
+	if response.Code != http.StatusOK || probe.lastList.Scope.ActorID != "actor" || probe.lastList.Provider != "records" || probe.lastList.Operation != "export" || probe.lastList.Status != "completed" || probe.lastList.Limit != 20 {
+		t.Fatalf("list status=%d request=%+v body=%s", response.Code, probe.lastList, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -121,7 +137,7 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	if probe.last.Scope.WorkspaceID != "workspace" || probe.last.Scope.ActorID != "actor" || probe.last.Provider != "records" || probe.last.Operation != "export" {
 		t.Fatalf("request=%+v", probe.last)
 	}
-	if body := response.Body.String(); strings.Contains(body, "secret") || strings.Contains(body, "options") || strings.Contains(body, "lease_owner") {
+	if body := response.Body.String(); strings.Contains(body, "secret") || strings.Contains(body, "options") || strings.Contains(body, "lease_owner") || strings.Contains(body, "actor_id") {
 		t.Fatalf("internal job state leaked: %s", body)
 	}
 
@@ -213,17 +229,21 @@ func (projectingProvider) OpenDataExchangeArtifact(_ context.Context, _ dataexch
 }
 
 func TestSurfaceUsesProviderOwnedJobProjection(t *testing.T) {
-	adapter, err := NewAdapter(&bindingProbe{}, &projectingHost{})
+	probe := &bindingProbe{}
+	adapter, err := NewAdapter(probe, &projectingHost{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/job-1?provider=reports&operation=export"))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"legacy_status":"running"`) || !strings.Contains(response.Body.String(), `"actor":"actor"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
+	if probe.last.Provider != "reports" || probe.last.Operation != "export" {
+		t.Fatalf("Report job request=%+v", probe.last)
+	}
 	response = httptest.NewRecorder()
-	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=records&operation=export"))
+	adapter.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/data-exchange/jobs/completed/download?provider=reports&operation=export"))
 	if response.Code != http.StatusOK || response.Body.String() != "provider\n" || response.Header().Get("Content-Disposition") != "attachment; filename=provider.csv" {
 		t.Fatalf("provider download status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}

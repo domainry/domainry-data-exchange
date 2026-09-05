@@ -35,6 +35,10 @@ type jobBinding interface {
 	Download(context.Context, dataexchange.JobRequest) (dataexchange.Artifact, error)
 }
 
+type jobListBinding interface {
+	Jobs(context.Context, dataexchange.JobListRequest) ([]dataexchange.Job, error)
+}
+
 type actionScopedJobBinding interface {
 	JobForAction(context.Context, dataexchange.JobRequest, string) (dataexchange.Job, error)
 }
@@ -62,6 +66,7 @@ func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, e
 		return nil, err
 	}
 	handlers := map[string]http.HandlerFunc{
+		dataexchange.ActionDataExchangeJobList:     s.listJobs,
 		dataexchange.ActionDataExchangeJobGet:      s.getJob,
 		dataexchange.ActionDataExchangeJobCancel:   s.cancelJob,
 		dataexchange.ActionDataExchangeJobDownload: s.downloadJob,
@@ -92,6 +97,51 @@ func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, e
 		return nil, fmt.Errorf("Data Exchange implementations have no Action manifest entries: %v", keys)
 	}
 	return s, nil
+}
+
+func (s *adapter) listJobs(response http.ResponseWriter, request *http.Request) {
+	principal, ok := identitysdk.PrincipalFromContext(request.Context())
+	if !ok {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "backend.authentication_required"})
+		return
+	}
+	limit := 0
+	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_list_request"})
+			return
+		}
+		limit = parsed
+	}
+	listRequest := dataexchange.JobListRequest{
+		Scope:    dataexchange.Scope{WorkspaceID: strings.TrimSpace(principal.WorkspaceID), ActorID: strings.TrimSpace(principal.UserID), RoleKey: strings.TrimSpace(principal.RoleKey), RequestID: strings.TrimSpace(request.Header.Get("X-Request-ID"))},
+		Provider: strings.TrimSpace(request.URL.Query().Get("provider")), Operation: strings.TrimSpace(request.URL.Query().Get("operation")), Status: strings.TrimSpace(request.URL.Query().Get("status")), Limit: limit,
+	}
+	if err := listRequest.Validate(); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_list_request"})
+		return
+	}
+	binding, supported := s.binding.(jobListBinding)
+	if !supported {
+		writeError(response, &apperror.AppError{Kind: apperror.KindUnavailable, Code: "backend.data_exchange.job_list_unavailable"})
+		return
+	}
+	jobs, err := binding.Jobs(request.Context(), listRequest)
+	if err != nil {
+		writeError(response, err)
+		return
+	}
+	items := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		projection, projectErr := s.projectJob(request, job, listRequest.Scope)
+		if projectErr != nil {
+			writeError(response, projectErr)
+			return
+		}
+		items = append(items, projection)
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"items": items})
 }
 
 func dataExchangeRoutes() ([]modulehttp.Route, error) {

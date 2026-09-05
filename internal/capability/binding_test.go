@@ -35,7 +35,7 @@ func TestDataExchangeCapabilityTracksJobsAndTransferContractsWithoutRuntimeReque
 			t.Fatalf("Data Exchange runtime request DTOs leaked into model validation scopes: %v", category.ValidationScopes)
 		}
 	}
-	if operations != 3 || projections != 2 {
+	if operations != 4 || projections != 2 {
 		t.Fatalf("Data Exchange operations=%d projections=%d", operations, projections)
 	}
 }

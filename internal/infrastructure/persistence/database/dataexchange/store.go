@@ -291,6 +291,46 @@ func (s *Store) Job(ctx context.Context, r dataexchange.JobRequest, access datae
 	}
 	return job, err
 }
+
+func (s *Store) Jobs(ctx context.Context, r dataexchange.JobListRequest, access dataexchangemodel.JobAccess) ([]dataexchange.Job, error) {
+	access = access.Normalized()
+	if access.WorkspaceID == "" || access.OwnerActorID == "" || access.WorkspaceID != strings.TrimSpace(r.Scope.WorkspaceID) || access.OwnerActorID != strings.TrimSpace(r.Scope.ActorID) {
+		return nil, dataexchange.ErrJobNotFound
+	}
+	limit := r.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	predicates := []query.Predicate{query.Equal("actor_id", access.OwnerActorID)}
+	if provider := strings.TrimSpace(r.Provider); provider != "" {
+		predicates = append(predicates, query.Equal("provider", provider))
+	}
+	if operation := strings.TrimSpace(r.Operation); operation != "" {
+		predicates = append(predicates, query.Equal("operation", operation))
+	}
+	if status := strings.TrimSpace(r.Status); status != "" {
+		predicates = append(predicates, query.Equal("status", status))
+	}
+	statement, args, err := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_jobs", access.WorkspaceID).
+		Columns(jobColumns...).Where(query.And(predicates...)).OrderBy(query.Descending("created_at"), query.Descending("id")).Limit(limit).Build()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID), statement, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	jobs := make([]dataexchange.Job, 0)
+	for rows.Next() {
+		job, scanErr := scanJob(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
 func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest, access dataexchangemodel.JobAccess) (dataexchange.Job, error) {
 	access = access.Normalized()
 	if !jobAccessMatchesScope(r, access) {

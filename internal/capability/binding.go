@@ -51,7 +51,7 @@ func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
 		}
 		overrides[route.Pattern()] = modulecapability.OperationExtension{
 			Owner: "data_exchange", Authorization: modulecapability.Authorization{
-				Strategy: route.Action.Authorization.Strategy, PolicyKey: route.Action.Authorization.PolicyKey,
+				Strategy: route.Action.Authorization.Strategy, Permission: route.Action.Permission.Key,
 				Audiences: append([]string(nil), route.Action.Authorization.Audiences...), WorkspaceScope: "authenticated_workspace",
 			},
 			Effect: modulecapability.EffectClass(route.Action.EffectClass), Idempotency: idempotency,
