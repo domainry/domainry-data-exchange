@@ -151,7 +151,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	lookupErr := tx.QueryRowContext(ctx, lookup, lookupArgs...).Scan(&existingHash)
 	if lookupErr == nil {
 		if existingHash != requestHash {
-			return dataexchange.Job{}, false, fmt.Errorf("Data Exchange idempotency key reused with a different source")
+			return dataexchange.Job{}, false, fmt.Errorf("%w with a different source", dataexchange.ErrIdempotencyKeyReused)
 		}
 		_ = tx.Rollback()
 		existing, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey)
@@ -174,7 +174,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 			if hashErr == nil && hash == requestHash {
 				return existing, true, nil
 			}
-			return dataexchange.Job{}, false, fmt.Errorf("Data Exchange idempotency key reused with a different source")
+			return dataexchange.Job{}, false, fmt.Errorf("%w with a different source", dataexchange.ErrIdempotencyKeyReused)
 		}
 		return dataexchange.Job{}, false, err
 	}
@@ -226,7 +226,7 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 		if j, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "export", r.ObjectKey, r.IdempotencyKey); ok {
 			existing, _ := s.requestHash(ctx, j.ID)
 			if existing != hash {
-				return dataexchange.Job{}, false, fmt.Errorf("Data Exchange idempotency key reused with a different request")
+				return dataexchange.Job{}, false, fmt.Errorf("%w with a different request", dataexchange.ErrIdempotencyKeyReused)
 			}
 			return j, true, nil
 		}

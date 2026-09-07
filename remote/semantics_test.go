@@ -2,6 +2,8 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +59,8 @@ type semanticTransport struct {
 	jobErr         error
 	cancelErr      error
 	downloadErr    error
+	importErr      error
+	exportErr      error
 	calls          []string
 }
 
@@ -71,11 +75,17 @@ func (*semanticTransport) Descriptor(context.Context, dataexchange.ApplicationRe
 func (t *semanticTransport) SubmitImport(_ context.Context, application dataexchange.ApplicationRef, request dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	t.application, t.lastImport = application, request
 	t.calls = append(t.calls, "submit_import")
+	if t.importErr != nil {
+		return dataexchange.Job{}, false, t.importErr
+	}
 	return dataexchange.Job{ID: "remote-import", Status: "queued"}, false, nil
 }
 func (t *semanticTransport) SubmitExport(_ context.Context, application dataexchange.ApplicationRef, request dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
 	t.application, t.lastExport = application, request
 	t.calls = append(t.calls, "submit_export")
+	if t.exportErr != nil {
+		return dataexchange.Job{}, false, t.exportErr
+	}
 	return dataexchange.Job{ID: "remote-export", Status: "queued"}, false, nil
 }
 func (t *semanticTransport) Job(_ context.Context, application dataexchange.ApplicationRef, request dataexchange.JobRequest) (dataexchange.Job, error) {
@@ -245,6 +255,22 @@ func TestSaaSBindingForwardsTransferEnvelopesWithoutBuffering(t *testing.T) {
 	}
 	if !reflect.DeepEqual(transport.lastExport, exportRequest) || !reflect.DeepEqual(transport.calls, []string{"submit_import", "submit_export"}) {
 		t.Fatalf("forwarded export=%+v calls=%v", transport.lastExport, transport.calls)
+	}
+}
+
+func TestSaaSBindingPreservesTypedIdempotencyConflictFromTransport(t *testing.T) {
+	binding, transport, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, func(transport *semanticTransport) {
+		transport.importErr = fmt.Errorf("remote import: %w", dataexchange.ErrIdempotencyKeyReused)
+		transport.exportErr = fmt.Errorf("remote export: %w", dataexchange.ErrIdempotencyKeyReused)
+	})
+	if _, _, err := binding.SubmitImport(t.Context(), dataexchange.ImportRequest{}); !errors.Is(err, dataexchange.ErrIdempotencyKeyReused) {
+		t.Fatalf("import error=%v", err)
+	}
+	if _, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{}); !errors.Is(err, dataexchange.ErrIdempotencyKeyReused) {
+		t.Fatalf("export error=%v", err)
+	}
+	if !reflect.DeepEqual(transport.calls, []string{"submit_import", "submit_export"}) {
+		t.Fatalf("transport calls=%v", transport.calls)
 	}
 }
 

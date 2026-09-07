@@ -765,7 +765,7 @@ func TestImportIdempotencyVerifiesStreamFingerprint(t *testing.T) {
 	if err != nil || !replay || second.ID != first.ID {
 		t.Fatalf("replay: job=%q replay=%v err=%v", second.ID, replay, err)
 	}
-	if _, _, err = b.SubmitImport(context.Background(), request("id,name\n1,different\n")); err == nil || !strings.Contains(err.Error(), "different source") {
+	if _, _, err = b.SubmitImport(context.Background(), request("id,name\n1,different\n")); !errors.Is(err, dataexchange.ErrIdempotencyKeyReused) || !strings.Contains(err.Error(), "different source") {
 		t.Fatalf("different source error=%v", err)
 	}
 }
@@ -774,13 +774,69 @@ func TestExportIdempotencyRejectsChangedOwnerReference(t *testing.T) {
 	b, _, _ := openTestBinding(t)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
 	request := dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "same-export", ReferenceID: "audit-one"}
-	if _, replayed, err := b.SubmitExport(t.Context(), request); err != nil || replayed {
-		t.Fatalf("first submit replayed=%v err=%v", replayed, err)
+	first, replayed, err := b.SubmitExport(t.Context(), request)
+	if err != nil || replayed {
+		t.Fatalf("first submit job=%+v replayed=%v err=%v", first, replayed, err)
+	}
+	replayedJob, replayedOK, err := b.SubmitExport(t.Context(), request)
+	if err != nil || !replayedOK || replayedJob.ID != first.ID {
+		t.Fatalf("same request replay job=%+v replayed=%v err=%v", replayedJob, replayedOK, err)
 	}
 	request.ReferenceID = "audit-two"
-	if _, _, err := b.SubmitExport(t.Context(), request); err == nil || !strings.Contains(err.Error(), "different request") {
+	if _, _, err := b.SubmitExport(t.Context(), request); !errors.Is(err, dataexchange.ErrIdempotencyKeyReused) || !strings.Contains(err.Error(), "different request") {
 		t.Fatalf("changed owner reference was accepted: %v", err)
 	}
+}
+
+func TestIdempotencyScopeDoesNotConflictAcrossWorkspaceObjectOrKey(t *testing.T) {
+	t.Run("export", func(t *testing.T) {
+		binding, _, _ := openTestBinding(t)
+		baseline := dataexchange.ExportRequest{
+			Scope: dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}, Provider: "records",
+			ObjectKey: "contact", IdempotencyKey: "scope-key", ReferenceID: "audit-one",
+		}
+		first, replayed, err := binding.SubmitExport(t.Context(), baseline)
+		if err != nil || replayed {
+			t.Fatalf("baseline job=%+v replayed=%v err=%v", first, replayed, err)
+		}
+		variants := []dataexchange.ExportRequest{
+			{Scope: dataexchange.Scope{WorkspaceID: "other-workspace", ActorID: "actor"}, Provider: "records", ObjectKey: "contact", IdempotencyKey: "scope-key", ReferenceID: "audit-two"},
+			{Scope: baseline.Scope, Provider: "records", ObjectKey: "account", IdempotencyKey: "scope-key", ReferenceID: "audit-three"},
+			{Scope: baseline.Scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "other-key", ReferenceID: "audit-four"},
+		}
+		for _, request := range variants {
+			job, replayed, err := binding.SubmitExport(t.Context(), request)
+			if err != nil || replayed || job.ID == first.ID {
+				t.Fatalf("request=%+v job=%+v replayed=%v err=%v", request, job, replayed, err)
+			}
+		}
+	})
+
+	t.Run("import", func(t *testing.T) {
+		binding, _, _ := openTestBinding(t)
+		scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+		request := func(workspace, objectKey, key, source string) dataexchange.ImportRequest {
+			return dataexchange.ImportRequest{
+				Scope: dataexchange.Scope{WorkspaceID: workspace, ActorID: scope.ActorID}, Provider: "records",
+				ObjectKey: objectKey, IdempotencyKey: key, Filename: "contact.csv", ContentType: "text/csv", Source: strings.NewReader(source),
+			}
+		}
+		first, replayed, err := binding.SubmitImport(t.Context(), request(scope.WorkspaceID, "contact", "scope-key", "id,name\n1,one\n"))
+		if err != nil || replayed {
+			t.Fatalf("baseline job=%+v replayed=%v err=%v", first, replayed, err)
+		}
+		variants := []dataexchange.ImportRequest{
+			request("other-workspace", "contact", "scope-key", "id,name\n1,two\n"),
+			request(scope.WorkspaceID, "account", "scope-key", "id,name\n1,three\n"),
+			request(scope.WorkspaceID, "contact", "other-key", "id,name\n1,four\n"),
+		}
+		for _, variant := range variants {
+			job, replayed, err := binding.SubmitImport(t.Context(), variant)
+			if err != nil || replayed || job.ID == first.ID {
+				t.Fatalf("request=%+v job=%+v replayed=%v err=%v", variant, job, replayed, err)
+			}
+		}
+	})
 }
 
 func TestModuleJobOwnerScopeKeepsActorAndWorkspaceIsolation(t *testing.T) {
