@@ -45,7 +45,7 @@ func (s *Store) Scoped(ctx context.Context, workspace, actor string) context.Con
 	return ctx
 }
 func jobID(scope dataexchange.Scope, provider, operation, objectKey, key string) string {
-	d := sha256.Sum256([]byte(scope.WorkspaceID + "\x00" + provider + "\x00" + operation + "\x00" + objectKey + "\x00" + key))
+	d := sha256.Sum256([]byte(scope.WorkspaceID + "\x00" + scope.ActorID + "\x00" + provider + "\x00" + operation + "\x00" + objectKey + "\x00" + key))
 	return "data_exchange:" + hex.EncodeToString(d[:12])
 }
 func fingerprint(parts ...[]byte) string {
@@ -101,6 +101,9 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 		return dataexchange.Job{}, false, err
 	}
 	defer tx.Rollback()
+	if err = s.checkSubjectSubmission(ctx, tx, r.Scope); err != nil {
+		return dataexchange.Job{}, false, err
+	}
 	limit := r.MaxBytes
 	if limit <= 0 {
 		limit = 128 << 20
@@ -143,6 +146,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	var existingHash string
 	lookup, lookupArgs, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(query.And(
 		query.Equal("workspace_id", r.Scope.WorkspaceID), query.Equal("provider", r.Provider), query.Equal("operation", "import"),
+		query.Equal("actor_id", r.Scope.ActorID),
 		query.Equal("object_key", r.ObjectKey), query.Equal("idempotency_key", r.IdempotencyKey),
 	)).Build()
 	if buildErr != nil {
@@ -217,6 +221,9 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 		return dataexchange.Job{}, false, beginErr
 	}
 	defer tx.Rollback()
+	if err := s.checkSubjectSubmission(ctx, tx, r.Scope); err != nil {
+		return dataexchange.Job{}, false, err
+	}
 	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "actor_id", "role_key", "reference_id", "created_at", "updated_at").
 		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
@@ -267,6 +274,7 @@ func scanJob(row scanner) (dataexchange.Job, error) {
 func (s *Store) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, provider, operation, objectKey, key string) (dataexchange.Job, bool) {
 	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns(jobColumns...).Where(query.And(
 		query.Equal("workspace_id", scope.WorkspaceID), query.Equal("provider", provider), query.Equal("operation", operation),
+		query.Equal("actor_id", scope.ActorID),
 		query.Equal("object_key", objectKey), query.Equal("idempotency_key", key),
 	)).Build()
 	if err != nil {

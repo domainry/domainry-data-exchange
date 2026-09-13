@@ -42,9 +42,29 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 	if err != nil {
 		return nil, err
 	}
+	fences, _, err := ormschema.NewTable(renderer, "_data_exchange_subject_erasure_fences").IfNotExists().
+		Columns(ormschema.Column("workspace_id", ormschema.TextKey(191)).NotNull(),
+			ormschema.Column("subject_id", ormschema.TextKey(191)).NotNull(),
+			ormschema.Column("request_id", ormschema.TextKey(191)).NotNull().DefaultValue("")).
+		PrimaryKey("workspace_id", "subject_id").Build()
+	if err != nil {
+		return nil, err
+	}
+	receipts, _, err := ormschema.NewTable(renderer, "_data_exchange_subject_erasure_receipts").IfNotExists().
+		Columns(ormschema.Column("workspace_id", ormschema.TextKey(191)).NotNull(),
+			ormschema.Column("request_id", ormschema.TextKey(191)).NotNull(),
+			ormschema.Column("subject_id", ormschema.TextKey(191)).NotNull(),
+			ormschema.Column("plan_json", ormschema.Text()).NotNull(),
+			ormschema.Column("result_json", ormschema.Text()).NotNull().DefaultValue("")).
+		PrimaryKey("workspace_id", "request_id").Build()
+	if err != nil {
+		return nil, err
+	}
 	return []modulehost.Migration{
 		{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_job_chunks_v1", SQL: chunks}, {ID: "data_exchange_artifacts_v1", SQL: artifacts},
 		{ID: "data_exchange_queue_scopes_v1", SQL: queueScopes}, {ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference},
 		{ID: "data_exchange_job_attempt_count_v3", SQL: attempts}, {ID: "data_exchange_job_next_attempt_v4", SQL: nextAttempt},
+		{ID: "data_exchange_subject_erasure_fences_v5", SQL: fences},
+		{ID: "data_exchange_subject_erasure_receipts_v6", SQL: receipts},
 	}, nil
 }

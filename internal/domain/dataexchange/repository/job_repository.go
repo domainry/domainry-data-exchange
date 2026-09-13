@@ -3,6 +3,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"time"
 
@@ -26,4 +27,12 @@ type JobRepository interface {
 	Fail(context.Context, model.WorkItem, model.FailurePlan) error
 	Heartbeat(context.Context, model.WorkItem, time.Duration) error
 	Scoped(context.Context, string, string) context.Context
+}
+
+// SubjectLifecycleRepository keeps subject fences, frozen plans and erasure
+// receipts inside the source module that owns jobs and their durable content.
+type SubjectLifecycleRepository interface {
+	PreviewSubject(context.Context, string, string) (json.RawMessage, error)
+	PrepareSubjectErasure(context.Context, dataexchange.SubjectErasureRequest) (json.RawMessage, error)
+	ErasePreparedSubject(context.Context, dataexchange.SubjectErasureRequest, json.RawMessage) (json.RawMessage, error)
 }

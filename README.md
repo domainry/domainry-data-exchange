@@ -42,6 +42,8 @@ the provider's business-data access.
 - Uploads are read incrementally into bounded chunks; the complete file is never required in one memory buffer.
 - Import validates the complete source before any Apply batch runs.
 - Idempotency compares the immutable source/request fingerprint.
+- Task identity and idempotent replay include the workspace and actor, so two
+  users may use the same key without sharing a task.
 - Export result chunk, next cursor, and progress commit atomically.
 - Each generated export page is format-validated and capped at 16 MiB before
   durable commit, preventing a provider page from becoming an unbounded buffer.
@@ -53,6 +55,21 @@ the provider's business-data access.
 - Artifact downloads stream ordered result chunks.
 
 White-label presentation is intentionally outside this module.
+
+## Account erasure
+
+`SubjectLifecycleBinding` supplies a privileged owner port to Lifecycle; it is
+not mounted on the job management HTTP routes. Preparation locks the subject,
+rejects running work, cancels queued work, and persists the exact job inventory.
+The same subject lock prevents a competing upload/export from committing after
+the erasure fence. Legal holds prevent preparation and execution.
+
+Execution removes source/result chunks and artifacts and clears personal
+request content, filenames, cursors, references, and raw idempotency keys from
+jobs in one source-owned transaction. Stable task IDs and a redacted terminal
+state remain. A persisted outcome makes retries deterministic; stale workers
+cannot recreate chunks or artifacts. Other actors and workspaces are excluded.
+A SaaS owner must implement `SubjectLifecycleTransport` to participate.
 
 ## Repository architecture
 

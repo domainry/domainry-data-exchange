@@ -38,7 +38,7 @@ func NewService(a dataexchange.ApplicationRef, h modulehost.Host, s dataexchange
 	return &Service{application: a, host: h, store: s}
 }
 func (*Service) Descriptor() dataexchange.Descriptor {
-	return dataexchange.Descriptor{ProtocolVersion: dataexchange.ProtocolVersionV1, Mode: dataexchange.DeploymentModeModule, Capabilities: []string{"streaming_import", "paged_export", "durable_chunks", "artifact_lifecycle"}}
+	return dataexchange.Descriptor{ProtocolVersion: dataexchange.ProtocolVersionV1, Mode: dataexchange.DeploymentModeModule, Capabilities: []string{"streaming_import", "paged_export", "durable_chunks", "artifact_lifecycle", "subject_erasure"}}
 }
 func (b *Service) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	if e := dataexchangeservice.ValidateImportRequest(r); e != nil {

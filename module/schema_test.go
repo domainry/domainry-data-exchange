@@ -71,7 +71,12 @@ func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			statement := migrations[len(migrations)-2].SQL
+			var statement string
+			for _, migration := range migrations {
+				if migration.ID == "data_exchange_job_attempt_count_v3" {
+					statement = migration.SQL
+				}
+			}
 			if !strings.Contains(statement, test.quotedTable) || !strings.Contains(statement, test.quotedColumn) {
 				t.Fatalf("ORM DDL=%q", statement)
 			}
