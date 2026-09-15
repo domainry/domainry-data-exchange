@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -25,6 +26,7 @@ const importBatchRows = 500
 const importMaxRows = 1_000_000
 const importMaxColumns = 512
 const exportPageMaxBytes = 16 << 20
+const inlineExportLeaseTTL = 30 * time.Second
 
 type Service struct {
 	application dataexchange.ApplicationRef
@@ -57,6 +59,33 @@ func (b *Service) SubmitExport(ctx context.Context, r dataexchange.ExportRequest
 		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange export provider %q is unavailable", r.Provider)
 	}
 	return b.store.SubmitExport(ctx, r)
+}
+
+// MaterializeExport claims only the requested durable export job and runs the
+// same processor as the background worker. If another worker already owns the
+// lease, the current job is returned unchanged for an asynchronous response.
+func (b *Service) MaterializeExport(ctx context.Context, r dataexchange.JobRequest) (dataexchange.Job, error) {
+	if err := r.Validate(); err != nil {
+		return dataexchange.Job{}, err
+	}
+	if strings.TrimSpace(r.Provider) == "" || strings.TrimSpace(r.Operation) != "export" {
+		return dataexchange.Job{}, fmt.Errorf("Data Exchange inline export request is incomplete")
+	}
+	owner := b.application.RuntimeID + ":" + b.application.ApplicationID + ":inline"
+	x, claimed, err := b.store.ClaimJob(ctx, r, owner, inlineExportLeaseTTL)
+	if err != nil {
+		return dataexchange.Job{}, err
+	}
+	if claimed {
+		if err = b.processClaimed(ctx, x, inlineExportLeaseTTL); err != nil {
+			return dataexchange.Job{}, err
+		}
+	}
+	return b.store.Job(ctx, r, dataexchangemodel.JobAccess{
+		PermissionKey: dataexchange.ActionDataExchangeJobGet,
+		WorkspaceID:   strings.TrimSpace(r.Scope.WorkspaceID),
+		OwnerActorID:  strings.TrimSpace(r.Scope.ActorID),
+	})
 }
 func (b *Service) Jobs(ctx context.Context, r dataexchange.JobListRequest) ([]dataexchange.Job, error) {
 	if e := r.Validate(); e != nil {
@@ -137,11 +166,7 @@ func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 				if e != nil || !ok {
 					break
 				}
-				if e = b.processWithHeartbeat(ctx, x, c.LeaseTTL); e != nil {
-					failCtx := b.store.Scoped(context.WithoutCancel(ctx), x.Scope.WorkspaceID, owner)
-					plan := dataexchangeservice.PlanProcessingFailure(x.Attempts, "processing_failed", time.Now().UTC())
-					_ = b.store.Fail(failCtx, x, plan)
-				}
+				_ = b.processClaimed(ctx, x, c.LeaseTTL)
 			}
 			select {
 			case <-ctx.Done():
@@ -151,6 +176,17 @@ func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 		}
 	}()
 	return done
+}
+
+func (b *Service) processClaimed(ctx context.Context, x dataexchangemodel.WorkItem, leaseTTL time.Duration) error {
+	if err := b.processWithHeartbeat(ctx, x, leaseTTL); err != nil {
+		failCtx := b.store.Scoped(context.WithoutCancel(ctx), x.Scope.WorkspaceID, x.Job.LeaseOwner)
+		plan := dataexchangeservice.PlanProcessingFailure(x.Attempts, "processing_failed", time.Now().UTC())
+		if failErr := b.store.Fail(failCtx, x, plan); failErr != nil {
+			return errors.Join(err, failErr)
+		}
+	}
+	return nil
 }
 
 func (b *Service) processWithHeartbeat(parent context.Context, x dataexchangemodel.WorkItem, ttl time.Duration) error {

@@ -19,6 +19,7 @@ type JobRepository interface {
 	Cancel(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Job, error)
 	Artifact(context.Context, dataexchange.JobRequest, model.JobAccess) (dataexchange.Artifact, error)
 	Claim(context.Context, string, time.Duration) (model.WorkItem, bool, error)
+	ClaimJob(context.Context, dataexchange.JobRequest, string, time.Duration) (model.WorkItem, bool, error)
 	Chunks(context.Context, string, string, string) (io.ReadCloser, error)
 	ResultIdentity(context.Context, string, string) (string, int64, error)
 	CommitResultPage(context.Context, model.WorkItem, int, []byte, string, int, int) error

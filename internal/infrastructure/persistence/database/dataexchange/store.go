@@ -452,7 +452,7 @@ func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dat
 		return dataexchangemodel.WorkItem{}, false, err
 	}
 	for _, workspace := range workspaces {
-		item, found, claimErr := s.claimWorkspace(s.Scoped(ctx, workspace, owner), workspace, owner, ttl)
+		item, found, claimErr := s.claimWorkspace(s.Scoped(ctx, workspace, owner), workspace, owner, ttl, nil)
 		if claimErr != nil {
 			return dataexchangemodel.WorkItem{}, false, claimErr
 		}
@@ -463,7 +463,15 @@ func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dat
 	return dataexchangemodel.WorkItem{}, false, nil
 }
 
-func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
+func (s *Store) ClaimJob(ctx context.Context, request dataexchange.JobRequest, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
+	if err := request.Validate(); err != nil {
+		return dataexchangemodel.WorkItem{}, false, err
+	}
+	workspace := strings.TrimSpace(request.Scope.WorkspaceID)
+	return s.claimWorkspace(s.Scoped(ctx, workspace, owner), workspace, owner, ttl, &request)
+}
+
+func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl time.Duration, request *dataexchange.JobRequest) (dataexchangemodel.WorkItem, bool, error) {
 	var x dataexchangemodel.WorkItem
 	var created, updated string
 	now := time.Now().UTC()
@@ -474,9 +482,23 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 		readyQueued,
 		query.And(query.Equal("status", "running"), query.NotEqual("lease_expires_at", ""), query.LessThan("lease_expires_at", now.Format(time.RFC3339Nano))),
 	)
+	candidate := []query.Predicate{query.Equal("workspace_id", workspace), claimable}
+	if request != nil {
+		candidate = append(candidate,
+			query.Equal("id", strings.TrimSpace(request.JobID)),
+			query.Equal("actor_id", strings.TrimSpace(request.Scope.ActorID)),
+		)
+		if provider := strings.TrimSpace(request.Provider); provider != "" {
+			candidate = append(candidate, query.Equal("provider", provider))
+		}
+		if operation := strings.TrimSpace(request.Operation); operation != "" {
+			candidate = append(candidate, query.Equal("operation", operation))
+		}
+	}
+	claimCandidate := query.And(candidate...)
 	queryValue, args, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "fencing_token", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "actor_id", "role_key", "reference_id", "object_key", "request_payload", "attempt_count").
-		Where(query.And(query.Equal("workspace_id", workspace), claimable)).OrderBy(query.Ascending("created_at")).Limit(1).Build()
+		Where(claimCandidate).OrderBy(query.Ascending("created_at")).Limit(1).Build()
 	if buildErr != nil {
 		return x, false, buildErr
 	}
@@ -497,7 +519,7 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 		Set("next_attempt_at", "").
 		SetExpression("fencing_token", query.Add(query.Column("fencing_token"), query.Value(1))).
 		Set("updated_at", now.Format(time.RFC3339Nano)).
-		Where(query.And(query.Equal("id", x.Job.ID), query.Equal("workspace_id", workspace), claimable))
+		Where(query.And(query.Equal("id", x.Job.ID), claimCandidate))
 	res, err := execute(ctx, s.db, update)
 	if err != nil {
 		return x, false, err

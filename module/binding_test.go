@@ -379,6 +379,46 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	}
 }
 
+func TestModuleInlineExportMaterializesOnlyTheRequestedDurableJob(t *testing.T) {
+	binding, _, _ := openTestBinding(t)
+	inline, ok := binding.(dataexchange.InlineExportBinding)
+	if !ok {
+		t.Fatal("module binding does not expose inline export materialization")
+	}
+	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor"}
+	first, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "inline-first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := binding.SubmitExport(t.Context(), dataexchange.ExportRequest{Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "inline-second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := inline.MaterializeExport(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: second.ID, Provider: "records", Operation: "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ID != second.ID || completed.Status != "completed" || completed.ArtifactID == "" {
+		t.Fatalf("inline job=%+v", completed)
+	}
+	queued, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: first.ID, Provider: "records", Operation: "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Status != "queued" || queued.ArtifactID != "" {
+		t.Fatalf("unrequested job changed=%+v", queued)
+	}
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: second.ID, Provider: "records", Operation: "export"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Content.Close()
+	content, err := io.ReadAll(artifact.Content)
+	if err != nil || string(content) != "id,name\n1,one\n2,two\n" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+}
+
 func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "report-export.db"))
 	if err != nil {
