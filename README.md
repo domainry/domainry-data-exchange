@@ -1,5 +1,7 @@
 # Domainry Data Exchange
 
+Agent-facing question index and source-owned guides: [`capability/agent/index.json`](capability/agent/index.json).
+
 Data Exchange owns the engineering mechanics of large tabular import/export. Runtime applications provide authorized domain operations through the SDK Provider interfaces; they do not own upload chunks, worker checkpoints, generated artifacts, or file parsing loops.
 
 The deployment-neutral SDK owns the single bounded CSV codec. The durable
