@@ -3,15 +3,11 @@
 package capability
 
 import (
-	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	internalcapability "github.com/domainry/domainry-data-exchange/internal/capability"
 	"github.com/domainry/domainry-foundation/modulecapability"
 )
 
-type Inputs struct {
-	Host modulehost.Host
-}
+type Inputs struct{}
 
 func Open(inputs Inputs) (*modulecapability.StaticBinding, error) {
-	return internalcapability.NewBinding(inputs.Host)
+	return openContract(inputs)
 }

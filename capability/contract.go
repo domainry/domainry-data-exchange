@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
-	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
 	"github.com/domainry/domainry-foundation/modulecapability"
 )
@@ -37,7 +36,7 @@ type JobSelectorCandidate struct {
 	Operation string `json:"operation,omitempty"`
 }
 
-func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
+func openContract(_ Inputs) (*modulecapability.StaticBinding, error) {
 	contract := dataexchange.DataExchangeHTTPAdapterContract()
 	routes, err := modulehttptransport.CapabilityRoutes()
 	if err != nil {
@@ -95,16 +94,11 @@ func NewBinding(_ modulehost.Host) (*modulecapability.StaticBinding, error) {
 			SupportedDeploymentModes: []modulecapability.DeploymentMode{modulecapability.DeploymentModeModule, modulecapability.DeploymentModeSaaS},
 		},
 		Name: "Data Exchange", Description: "Owns durable streaming imports, paged or canonical exports, transfer jobs, chunks, integrity evidence, cancellation, and artifact lifecycle while business providers own row and artifact semantics.",
-		Scenarios: modulecapability.AdaptationScenarios{
-			UseWhen:              []string{"A PRD needs large or asynchronous data import/export, upload-backed processing, downloadable artifacts, progress tracking, cancellation, retries, or durable transfer evidence"},
-			DoNotUseWhen:         []string{"The requirement is a small synchronous CRUD request, an on-screen report with no artifact, or direct file storage without import/export job semantics"},
-			RequirementSignals:   []string{"CSV import", "bulk import", "export file", "download artifact", "transfer progress", "cancel export", "large dataset", "batch data"},
+		Composition: modulecapability.ModuleComposition{
 			ProvidedCapabilities: []string{"data_exchange.streaming_import", "data_exchange.paged_export", "data_exchange.canonical_artifact", "data_exchange.durable_job", "data_exchange.job_cancel", "data_exchange.artifact_download", "data_exchange.integrity_evidence"},
 			RequiredModules:      []string{"identity"}, OptionalModules: []string{"audit", "report"}, ConflictingModules: []string{},
-			AssemblyChains:    []string{"file_upload_to_data_exchange_import", "record_or_report_query_to_data_exchange_export", "data_exchange_job_to_file_download"},
-			ValidationScopes:  []string{},
-			SelectionExamples: []modulecapability.ScenarioExample{{Requirement: "Import a large CSV asynchronously and expose progress, cancellation, and rejected-row evidence", Reason: "Data Exchange owns durable source chunks, worker recovery, transfer progress, and job lifecycle while the Records provider validates rows"}},
-			RejectionExamples: []modulecapability.ScenarioExample{{Requirement: "Display a paginated report table in the browser", Reason: "Report query is sufficient until a durable downloadable export artifact is required"}},
+			AssemblyChains:   []string{"file_upload_to_data_exchange_import", "record_or_report_query_to_data_exchange_export", "data_exchange_job_to_file_download"},
+			ValidationScopes: []string{},
 		},
 	}
 	return modulecapability.NewStaticBinding(summary, []modulecapability.CategoryDocument{jobs, transfer}, nil)

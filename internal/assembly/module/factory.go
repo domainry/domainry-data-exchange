@@ -47,7 +47,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	capabilityBinding, err := dataexchangecapability.Open(dataexchangecapability.Inputs{Host: host})
+	capabilityBinding, err := dataexchangecapability.Open(dataexchangecapability.Inputs{})
 	if err != nil {
 		return nil, fmt.Errorf("build Data Exchange capability disclosure: %w", err)
 	}

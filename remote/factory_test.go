@@ -54,7 +54,7 @@ func (*remoteTestTransport) Close(context.Context, dataexchange.ApplicationRef) 
 
 func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 	host := remoteTestHost{}
-	direct, err := sourcecapability.Open(sourcecapability.Inputs{Host: host})
+	direct, err := sourcecapability.Open(sourcecapability.Inputs{})
 	if err != nil {
 		t.Fatal(err)
 	}

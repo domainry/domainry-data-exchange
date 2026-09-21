@@ -8,7 +8,7 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	"github.com/domainry/domainry-data-exchange-sdk/saashost"
-	sourcecapability "github.com/domainry/domainry-data-exchange/internal/capability"
+	sourcecapability "github.com/domainry/domainry-data-exchange/capability"
 	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
 	"github.com/domainry/domainry-foundation/modulecapability"
 	"github.com/domainry/domainry-foundation/modulehttp"
@@ -27,7 +27,7 @@ func (f Factory) OpenSaaS(ctx context.Context, app dataexchange.ApplicationRef, 
 	if f.transport == nil || host == nil {
 		return nil, fmt.Errorf("Data Exchange SaaS transport and host are required")
 	}
-	localCapability, err := sourcecapability.NewBinding(host)
+	localCapability, err := sourcecapability.Open(sourcecapability.Inputs{})
 	if err != nil {
 		return nil, fmt.Errorf("open Data Exchange source capability: %w", err)
 	}

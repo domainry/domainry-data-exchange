@@ -112,7 +112,7 @@ func (*semanticTransport) Close(context.Context, dataexchange.ApplicationRef) er
 
 func openSemanticBinding(t *testing.T, host semanticHost, configure func(*semanticTransport)) (dataexchange.Binding, *semanticTransport, modulecapability.Binding) {
 	t.Helper()
-	direct, err := sourcecapability.Open(sourcecapability.Inputs{Host: host})
+	direct, err := sourcecapability.Open(sourcecapability.Inputs{})
 	if err != nil {
 		t.Fatal(err)
 	}

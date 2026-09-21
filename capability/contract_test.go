@@ -9,7 +9,7 @@ import (
 )
 
 func TestDataExchangeCapabilityTracksJobsAndTransferContractsWithoutRuntimeRequestValidation(t *testing.T) {
-	binding, err := NewBinding(nil)
+	binding, err := Open(Inputs{})
 	if err != nil {
 		t.Fatal(err)
 	}
