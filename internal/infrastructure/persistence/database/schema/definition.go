@@ -55,7 +55,7 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 			ormschema.Column("request_id", ormschema.TextKey(191)).NotNull(),
 			ormschema.Column("subject_id", ormschema.TextKey(191)).NotNull(),
 			ormschema.Column("plan_json", ormschema.Text()).NotNull(),
-			ormschema.Column("result_json", ormschema.Text()).NotNull().DefaultValue("")).
+			ormschema.Column("result_json", ormschema.Text()).NotNull()).
 		PrimaryKey("workspace_id", "request_id").Build()
 	if err != nil {
 		return nil, err

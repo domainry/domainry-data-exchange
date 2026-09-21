@@ -83,3 +83,24 @@ func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
 		})
 	}
 }
+
+func TestMySQLSubjectErasureReceiptTextHasNoDefault(t *testing.T) {
+	engine, err := persistenceengine.NewEngine("mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := persistence.SchemaMigrations(engine, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.ID != "data_exchange_subject_erasure_receipts_v6" {
+			continue
+		}
+		if !strings.Contains(migration.SQL, "`result_json` TEXT NOT NULL") || strings.Contains(migration.SQL, "`result_json` TEXT NOT NULL DEFAULT") {
+			t.Fatalf("MySQL TEXT column must not declare a default: %s", migration.SQL)
+		}
+		return
+	}
+	t.Fatal("subject erasure receipt migration is missing")
+}
