@@ -19,19 +19,21 @@ import (
 	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	sharedartifact "github.com/domainry/domainry-foundation/artifact"
+	sharedworkerscope "github.com/domainry/domainry-foundation/workerscope"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 	"github.com/domainry/domainry-orm/query"
 )
 
 const sourceChunkBytes = 1 << 20
 
-const dataExchangeWorkerScopeOwner = "data_exchange"
+const dataExchangeWorkerScopeOwner = sharedworkerscope.OwnerDataExchange
 
 type Store struct {
 	db               *sql.DB
 	engine           persistenceengine.Engine
 	renderer         ormdialect.Renderer
 	artifacts        sharedartifact.Store
+	workerScopes     *sharedworkerscope.Store
 	workspaceContext func(context.Context, string, string) context.Context
 	subjectLifecycle atomic.Bool
 }
@@ -45,7 +47,8 @@ func NewStore(db *sql.DB, engine persistenceengine.Engine, schema string, artifa
 	if artifacts == nil {
 		return nil, fmt.Errorf("Data Exchange shared Artifact store is required")
 	}
-	return &Store{db: db, engine: engine, renderer: engine.Dialect().WithSchema(schema), artifacts: artifacts, workspaceContext: workspaceContext}, nil
+	renderer := engine.Dialect().WithSchema(schema)
+	return &Store{db: db, engine: engine, renderer: renderer, artifacts: artifacts, workerScopes: sharedworkerscope.NewStore(db, renderer), workspaceContext: workspaceContext}, nil
 }
 func (s *Store) Scoped(ctx context.Context, workspace, actor string) context.Context {
 	if s.workspaceContext != nil {
@@ -93,17 +96,7 @@ func execute(ctx context.Context, executor sqlExecer, statement statementBuilder
 }
 
 func (s *Store) registerScope(ctx context.Context, executor sqlExecer, workspace string) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	digest := sha256.Sum256([]byte(dataExchangeWorkerScopeOwner + "\x00" + workspace))
-	id := "worker_scope:" + hex.EncodeToString(digest[:12])
-	insert := query.NewInsertBuilder(s.renderer, "_worker_scopes").
-		Columns("id", "owner", "scope_key", "updated_at").Values(id, dataExchangeWorkerScopeOwner, workspace, now)
-	insert, err := s.engine.ApplyUpsert(insert, []string{"owner", "scope_key"}, query.Assign("updated_at", now))
-	if err != nil {
-		return err
-	}
-	_, err = execute(ctx, executor, insert)
-	return err
+	return s.workerScopes.Register(ctx, executor, sharedworkerscope.NewIdentity(dataExchangeWorkerScopeOwner, workspace), time.Now().UTC())
 }
 
 type importRequestPayload struct {
@@ -452,24 +445,8 @@ func columnEqual(alias, column string, value any) query.Predicate {
 }
 
 func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
-	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_worker_scopes").Columns("scope_key").Where(query.Equal("owner", dataExchangeWorkerScopeOwner)).OrderBy(query.Ascending("updated_at"), query.Ascending("scope_key")).Build()
+	workspaces, err := s.workerScopes.ScopeKeys(ctx, nil, sharedworkerscope.ScopeQuery{Owner: dataExchangeWorkerScopeOwner, Order: sharedworkerscope.UpdatedAtAscending})
 	if err != nil {
-		return dataexchangemodel.WorkItem{}, false, err
-	}
-	rows, err := s.db.QueryContext(ctx, queryValue, args...)
-	if err != nil {
-		return dataexchangemodel.WorkItem{}, false, err
-	}
-	workspaces := make([]string, 0)
-	for rows.Next() {
-		var workspace string
-		if err = rows.Scan(&workspace); err != nil {
-			_ = rows.Close()
-			return dataexchangemodel.WorkItem{}, false, err
-		}
-		workspaces = append(workspaces, workspace)
-	}
-	if err = rows.Close(); err != nil {
 		return dataexchangemodel.WorkItem{}, false, err
 	}
 	for _, workspace := range workspaces {

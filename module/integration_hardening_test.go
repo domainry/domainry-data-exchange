@@ -22,6 +22,7 @@ import (
 	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
 	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	sharedworkerscope "github.com/domainry/domainry-foundation/workerscope"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,7 +39,7 @@ func (r *ledgerMigrationRegistrar) ApplyOwnedMigrations(ctx context.Context, own
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
-	if owner != "data_exchange" && owner != sharedartifact.MigrationOwner {
+	if owner != "data_exchange" && owner != sharedartifact.MigrationOwner && owner != sharedworkerscope.MigrationOwner {
 		return fmt.Errorf("unexpected migration owner %q", owner)
 	}
 	for _, migration := range migrations {
@@ -145,13 +146,13 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 	t.Cleanup(func() { _ = binding.Close(context.Background()); _ = second.Close(context.Background()) })
 
 	var ledgerRows, ledgerTables int
-	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 18 {
+	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 19 {
 		t.Fatalf("shared host migration ledger rows=%d err=%v", ledgerRows, err)
 	}
 	if err := host.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%schema_migrations%'`).Scan(&ledgerTables); err != nil || ledgerTables != 1 {
 		t.Fatalf("migration ledger tables=%d err=%v", ledgerTables, err)
 	}
-	if host.registrar.calls != 4 {
+	if host.registrar.calls != 6 {
 		t.Fatalf("host migration registrar calls=%d", host.registrar.calls)
 	}
 

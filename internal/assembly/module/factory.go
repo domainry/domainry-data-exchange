@@ -13,6 +13,7 @@ import (
 	modulehttptransport "github.com/domainry/domainry-data-exchange/internal/transport/http/module"
 	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	sharedworkerscope "github.com/domainry/domainry-foundation/workerscope"
 )
 
 type Options struct{}
@@ -48,6 +49,9 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, fmt.Errorf("open Data Exchange Artifact persistence: %w", err)
 	}
+	if _, err := sharedworkerscope.Open(ctx, host.Database(), renderer, workerScopeMigrationRegistrar{target: host.Migrations()}); err != nil {
+		return nil, fmt.Errorf("open Data Exchange Worker Scope persistence: %w", err)
+	}
 	store, err := persistence.NewStore(host.Database(), engine, host.Migrations().Schema(), artifacts, host.WorkspaceContext)
 	if err != nil {
 		return nil, err
@@ -74,6 +78,26 @@ func (r artifactMigrationRegistrar) ApplyOwnedMigrations(ctx context.Context, ow
 		for index, statement := range migration.Statements {
 			items = append(items, modulehost.Migration{
 				ID:  fmt.Sprintf("artifact_v%d_%03d", migration.Version, index+1),
+				SQL: statement,
+			})
+		}
+	}
+	return r.target.ApplyOwnedMigrations(ctx, owner, items)
+}
+
+type workerScopeMigrationRegistrar struct{ target modulehost.MigrationRegistrar }
+
+func (r workerScopeMigrationRegistrar) ApplyOwnedMigrations(ctx context.Context, owner string, migrations []sharedworkerscope.SchemaMigration) error {
+	if target, ok := r.target.(interface {
+		ApplyFoundationWorkerScopeMigrations(context.Context, string, []sharedworkerscope.SchemaMigration) error
+	}); ok {
+		return target.ApplyFoundationWorkerScopeMigrations(ctx, owner, migrations)
+	}
+	items := make([]modulehost.Migration, 0)
+	for _, migration := range migrations {
+		for index, statement := range migration.Statements {
+			items = append(items, modulehost.Migration{
+				ID:  fmt.Sprintf("worker_scope_v%d_%03d", migration.Version, index+1),
 				SQL: statement,
 			})
 		}

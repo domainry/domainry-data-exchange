@@ -22,6 +22,7 @@ import (
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	sharedworkerscope "github.com/domainry/domainry-foundation/workerscope"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 	_ "modernc.org/sqlite"
 )
@@ -212,6 +213,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	if err := host.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
+	applyWorkerScopeMigrations(t, db, engine)
 	store, err := persistence.NewStore(db, engine, "", host.artifacts, host.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
@@ -239,11 +241,27 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	if err := h.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
+	applyWorkerScopeMigrations(t, db, engine)
 	store, err := persistence.NewStore(db, engine, "", h.artifacts, h.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return exchange.NewBinding(dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, h, store), store, db
+}
+
+func applyWorkerScopeMigrations(t *testing.T, db *sql.DB, engine persistenceengine.Engine) {
+	t.Helper()
+	migrations, err := sharedworkerscope.SchemaMigrationsForDialect(engine.Dialect().WithSchema(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		for _, statement := range migration.Statements {
+			if _, err := db.ExecContext(t.Context(), statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 
 func waitCompleted(t *testing.T, b dataexchange.Binding, scope dataexchange.Scope, id string) dataexchange.Job {

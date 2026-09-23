@@ -24,7 +24,7 @@ func TestCurrentMigrationChecksumsAreDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(migrations) != 6 || len(repeated) != len(migrations) {
+		if len(migrations) != 5 || len(repeated) != len(migrations) {
 			t.Fatalf("%s migration count=%d repeat=%d", driver, len(migrations), len(repeated))
 		}
 		for index := range migrations {
