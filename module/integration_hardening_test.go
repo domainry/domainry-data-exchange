@@ -146,7 +146,7 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 	t.Cleanup(func() { _ = binding.Close(context.Background()); _ = second.Close(context.Background()) })
 
 	var ledgerRows, ledgerTables int
-	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 19 {
+	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 16 {
 		t.Fatalf("shared host migration ledger rows=%d err=%v", ledgerRows, err)
 	}
 	if err := host.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%schema_migrations%'`).Scan(&ledgerTables); err != nil || ledgerTables != 1 {

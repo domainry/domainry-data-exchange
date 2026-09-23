@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/base"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 	ormpostgres "github.com/domainry/domainry-orm/postgres"
 )
@@ -17,6 +16,3 @@ func NewEngine() Engine {
 }
 
 func (engine Engine) Dialect() ormdialect.Dialect { return engine.dialect }
-func (Engine) HistoricalSchema() base.HistoricalSchema {
-	return base.HistoricalSchema{TextType: "TEXT", KeyType: "TEXT", LargeType: "TEXT", QualifySchema: true}
-}

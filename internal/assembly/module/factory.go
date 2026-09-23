@@ -41,7 +41,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err != nil {
 		return nil, err
 	}
-	if err := host.Migrations().ApplyOwnedMigrations(ctx, "data_exchange", migrations); err != nil {
+	if err := host.Migrations().ApplyOwnedMigrations(ctx, persistenceschema.MigrationOwner, migrations); err != nil {
 		return nil, fmt.Errorf("apply Data Exchange Module migrations: %w", err)
 	}
 	renderer := engine.Dialect().WithSchema(host.Migrations().Schema())

@@ -2,44 +2,104 @@ package schema
 
 import (
 	"fmt"
-	ormschema "github.com/domainry/domainry-orm/schema"
 
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	"github.com/domainry/domainry-foundation/schemaownership"
+	ormschema "github.com/domainry/domainry-orm/schema"
 )
 
-// SchemaMigrations describes the final pre-release owner schema. Shared
-// Artifact metadata and subject lifecycle state are supplied by the host.
+const (
+	MigrationOwner     = "data_exchange"
+	JobsTableName      = "_data_exchange_jobs"
+	JobChunksTableName = "_data_exchange_job_chunks"
+)
+
+// SchemaMigrations describes the canonical fresh Data Exchange schema. Shared
+// Artifact and Worker Scope tables remain owned and installed by Foundation.
 func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]modulehost.Migration, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("Data Exchange database engine is required")
 	}
-	profile := engine.HistoricalSchema()
-	key, large := profile.KeyType, profile.LargeType
-	jobsTable := profile.Table(schema, "_data_exchange_jobs")
-	chunksTable := profile.Table(schema, "_data_exchange_job_chunks")
-	jobs := `CREATE TABLE IF NOT EXISTS ` + jobsTable + ` (` +
-		`id ` + key + ` PRIMARY KEY, workspace_id ` + key + ` NOT NULL, provider ` + key + ` NOT NULL, operation ` + key + ` NOT NULL, object_key ` + key + ` NOT NULL, ` +
-		`idempotency_key ` + key + ` NOT NULL, request_sha256 ` + key + ` NOT NULL, request_payload ` + large + ` NOT NULL, status ` + key + ` NOT NULL, checkpoint_value INTEGER NOT NULL DEFAULT 0, checkpoint_cursor ` + key + ` NOT NULL DEFAULT '', total_value INTEGER NOT NULL DEFAULT 0, result_chunks INTEGER NOT NULL DEFAULT 0, ` +
-		`source_sha256 ` + key + ` NOT NULL DEFAULT '', source_bytes BIGINT NOT NULL DEFAULT 0, source_chunks INTEGER NOT NULL DEFAULT 0, artifact_id ` + key + ` NOT NULL DEFAULT '', error_code ` + key + ` NOT NULL DEFAULT '', ` +
-		`lease_owner ` + key + ` NOT NULL DEFAULT '', lease_expires_at ` + key + ` NOT NULL DEFAULT '', fencing_token BIGINT NOT NULL DEFAULT 0, ` +
-		`actor_id ` + key + ` NOT NULL, role_key ` + key + ` NOT NULL DEFAULT '', created_at ` + key + ` NOT NULL, updated_at ` + key + ` NOT NULL)`
-	chunks := `CREATE TABLE IF NOT EXISTS ` + chunksTable + ` (` +
-		`workspace_id ` + key + ` NOT NULL, job_id ` + key + ` NOT NULL, direction ` + key + ` NOT NULL, sequence_no INTEGER NOT NULL, content ` + large + ` NOT NULL, content_sha256 ` + key + ` NOT NULL, created_at ` + key + ` NOT NULL, ` +
-		`PRIMARY KEY(workspace_id, job_id, direction, sequence_no))`
-	ownerReference := `ALTER TABLE ` + jobsTable + ` ADD COLUMN reference_id ` + key + ` NOT NULL DEFAULT ''`
 	renderer := engine.Dialect().WithSchema(schema)
-	attempts, _, err := ormschema.NewAddColumn(renderer, "_data_exchange_jobs", ormschema.Column("attempt_count", ormschema.Integer()).NotNull().DefaultValue(0)).Build()
+	jobs, _, err := jobsTable(renderer).Build()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build Data Exchange jobs table: %w", err)
 	}
-	nextAttempt, _, err := ormschema.NewAddColumn(renderer, "_data_exchange_jobs", ormschema.Column("next_attempt_at", ormschema.TextKey(191)).NotNull().DefaultValue("")).Build()
+	chunks, _, err := jobChunksTable(renderer).Build()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build Data Exchange job chunks table: %w", err)
 	}
 	return []modulehost.Migration{
-		{ID: "data_exchange_jobs_v1", SQL: jobs}, {ID: "data_exchange_job_chunks_v1", SQL: chunks},
-		{ID: "data_exchange_job_owner_reference_v2", SQL: ownerReference},
-		{ID: "data_exchange_job_attempt_count_v3", SQL: attempts}, {ID: "data_exchange_job_next_attempt_v4", SQL: nextAttempt},
+		{ID: "data_exchange_jobs_v1", SQL: jobs},
+		{ID: "data_exchange_job_chunks_v1", SQL: chunks},
 	}, nil
+}
+
+func jobsTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
+	return ormschema.NewTable(renderer, JobsTableName).Columns(
+		required("id", ormschema.TextKey(191)),
+		required("workspace_id", ormschema.TextKey(191)),
+		required("provider", ormschema.TextKey(191)),
+		required("operation", ormschema.TextKey(191)),
+		required("object_key", ormschema.TextKey(191)),
+		required("idempotency_key", ormschema.TextKey(191)),
+		required("request_sha256", ormschema.TextKey(64)),
+		required("request_payload", ormschema.LongText()),
+		required("status", ormschema.TextKey(64)),
+		required("checkpoint_value", ormschema.Integer()).DefaultValue(0),
+		required("checkpoint_cursor", ormschema.TextKey(191)).DefaultValue(""),
+		required("total_value", ormschema.Integer()).DefaultValue(0),
+		required("result_chunks", ormschema.Integer()).DefaultValue(0),
+		required("source_sha256", ormschema.TextKey(64)).DefaultValue(""),
+		required("source_bytes", ormschema.BigInt()).DefaultValue(0),
+		required("source_chunks", ormschema.Integer()).DefaultValue(0),
+		required("artifact_id", ormschema.TextKey(191)).DefaultValue(""),
+		required("error_code", ormschema.TextKey(191)).DefaultValue(""),
+		required("lease_owner", ormschema.TextKey(191)).DefaultValue(""),
+		required("lease_expires_at", ormschema.TextKey(40)).DefaultValue(""),
+		required("fencing_token", ormschema.BigInt()).DefaultValue(0),
+		required("actor_id", ormschema.TextKey(191)),
+		required("role_key", ormschema.TextKey(191)).DefaultValue(""),
+		required("created_at", ormschema.TextKey(40)),
+		required("updated_at", ormschema.TextKey(40)),
+		required("reference_id", ormschema.TextKey(191)).DefaultValue(""),
+		required("attempt_count", ormschema.Integer()).DefaultValue(0),
+		required("next_attempt_at", ormschema.TextKey(40)).DefaultValue(""),
+	).PrimaryKey("id")
+}
+
+func jobChunksTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
+	return ormschema.NewTable(renderer, JobChunksTableName).Columns(
+		required("workspace_id", ormschema.TextKey(191)),
+		required("job_id", ormschema.TextKey(191)),
+		required("direction", ormschema.TextKey(32)),
+		required("sequence_no", ormschema.Integer()),
+		required("content", ormschema.LongText()),
+		required("content_sha256", ormschema.TextKey(64)),
+		required("created_at", ormschema.TextKey(40)),
+	).PrimaryKey("workspace_id", "job_id", "direction", "sequence_no")
+}
+
+func SchemaOwnership() []schemaownership.Table {
+	return []schemaownership.Table{
+		{
+			Name: JobsTableName, Owner: MigrationOwner, WorkspaceScope: schemaownership.ScopeWorkspace,
+			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"id"},
+			BoundedQueryPath: "workspace plus job identity for point reads; actor-scoped history and worker claim paths enforce limits",
+			DeletionPolicy:   "subject erasure redacts the durable job record, removes payload and personal references, and retains only non-personal execution history",
+		},
+		{
+			Name: JobChunksTableName, Owner: MigrationOwner, WorkspaceScope: schemaownership.ScopeWorkspace,
+			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"workspace_id", "job_id", "direction", "sequence_no"},
+			BoundedQueryPath: "workspace, job and direction primary-key prefix; content is streamed in sequence order instead of materialized",
+			DeletionPolicy:   "subject erasure physically deletes every source and result chunk for the subject's jobs; artifact expiry may make retained result content inaccessible",
+		},
+	}
+}
+
+func OwnedTables() []string { return schemaownership.Names(SchemaOwnership()) }
+
+func required(name string, kind ormschema.ColumnType) ormschema.ColumnDefinition {
+	return ormschema.Column(name, kind).NotNull()
 }

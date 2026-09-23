@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/base"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 	ormmysql "github.com/domainry/domainry-orm/mysql"
 )
@@ -17,6 +16,3 @@ func NewEngine() Engine {
 }
 
 func (engine Engine) Dialect() ormdialect.Dialect { return engine.dialect }
-func (Engine) HistoricalSchema() base.HistoricalSchema {
-	return base.HistoricalSchema{TextType: "VARCHAR(512)", KeyType: "VARCHAR(191)", LargeType: "LONGTEXT", QualifySchema: true}
-}

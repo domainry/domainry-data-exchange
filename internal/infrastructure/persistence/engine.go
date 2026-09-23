@@ -3,7 +3,6 @@ package persistence
 import (
 	"fmt"
 
-	"github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/base"
 	mysqlengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/mysql"
 	postgresengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/postgres"
 	sqliteengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/sqlite"
@@ -14,7 +13,6 @@ import (
 type Engine interface {
 	ormdriver.Profile
 	Dialect() ormdialect.Dialect
-	HistoricalSchema() base.HistoricalSchema
 }
 
 var engineFactories = map[ormdialect.Name]func() Engine{

@@ -3,11 +3,13 @@ package module
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
+	"github.com/domainry/domainry-foundation/schemaownership"
 )
 
 func TestCurrentMigrationChecksumsAreDeterministic(t *testing.T) {
@@ -24,7 +26,7 @@ func TestCurrentMigrationChecksumsAreDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(migrations) != 5 || len(repeated) != len(migrations) {
+		if len(migrations) != 2 || len(repeated) != len(migrations) {
 			t.Fatalf("%s migration count=%d repeat=%d", driver, len(migrations), len(repeated))
 		}
 		for index := range migrations {
@@ -56,7 +58,7 @@ func TestMySQLSchemaUsesIndexSafeIdentityColumns(t *testing.T) {
 	}
 }
 
-func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
+func TestCanonicalFreshSchemaIncludesFinalColumnsWithoutAlterMigrations(t *testing.T) {
 	tests := []struct {
 		driver, quotedTable, quotedColumn string
 	}{
@@ -74,16 +76,39 @@ func TestNewRecoveryMigrationsUseDialectQuotedORMDDL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var statement string
+			var jobs string
 			for _, migration := range migrations {
-				if migration.ID == "data_exchange_job_attempt_count_v3" {
-					statement = migration.SQL
+				if strings.Contains(strings.ToUpper(migration.SQL), "ALTER TABLE") {
+					t.Fatalf("historical ALTER migration remains: %s", migration.ID)
+				}
+				if migration.ID == "data_exchange_jobs_v1" {
+					jobs = migration.SQL
 				}
 			}
-			if !strings.Contains(statement, test.quotedTable) || !strings.Contains(statement, test.quotedColumn) {
-				t.Fatalf("ORM DDL=%q", statement)
+			if !strings.Contains(jobs, test.quotedTable) || !strings.Contains(jobs, test.quotedColumn) {
+				t.Fatalf("ORM DDL=%q", jobs)
+			}
+			for _, column := range []string{"reference_id", "attempt_count", "next_attempt_at"} {
+				if !strings.Contains(jobs, column) {
+					t.Fatalf("canonical jobs DDL lacks %s: %s", column, jobs)
+				}
 			}
 		})
+	}
+}
+
+func TestModulePublishesOnlyDataExchangeOwnedSchema(t *testing.T) {
+	tables := SchemaOwnership()
+	if err := schemaownership.ValidateAll(tables); err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 2 || !slices.Equal(OwnedTables(), schemaownership.Names(tables)) {
+		t.Fatalf("Data Exchange schema ownership=%d tables=%v", len(tables), OwnedTables())
+	}
+	for _, table := range tables {
+		if table.Owner != persistence.MigrationOwner || !strings.HasPrefix(table.Name, "_data_exchange_") {
+			t.Fatalf("Data Exchange Module claimed foreign table: %+v", table)
+		}
 	}
 }
 
