@@ -6,7 +6,6 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	dataexchangecapability "github.com/domainry/domainry-data-exchange/capability"
 	dataexchangesdkadapter "github.com/domainry/domainry-data-exchange/internal/adapter/dataexchangesdk"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
@@ -29,7 +28,7 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err := application.Validate(); err != nil {
 		return nil, err
 	}
-	if host == nil || host.Database() == nil || host.Migrations() == nil {
+	if host == nil || host.Database() == nil || host.ArtifactStore() == nil || host.Migrations() == nil {
 		return nil, fmt.Errorf("Data Exchange Module host is incomplete")
 	}
 	engine, err := persistenceengine.NewEngine(host.Migrations().Driver())
@@ -43,15 +42,11 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 	if err := host.Migrations().ApplyOwnedMigrations(ctx, "data_exchange", migrations); err != nil {
 		return nil, fmt.Errorf("apply Data Exchange Module migrations: %w", err)
 	}
-	store, err := persistence.NewStore(host.Database(), engine, host.Migrations().Schema(), host.WorkspaceContext)
+	store, err := persistence.NewStore(host.Database(), engine, host.Migrations().Schema(), host.ArtifactStore(), host.WorkspaceContext)
 	if err != nil {
 		return nil, err
 	}
-	capabilityBinding, err := dataexchangecapability.Open(dataexchangecapability.Inputs{})
-	if err != nil {
-		return nil, fmt.Errorf("build Data Exchange capability disclosure: %w", err)
-	}
-	binding := dataexchangesdkadapter.NewBinding(application, host, store, capabilityBinding)
+	binding := dataexchangesdkadapter.NewBinding(application, host, store)
 	adapter, err := modulehttptransport.NewAdapter(binding, host)
 	if err != nil {
 		return nil, err

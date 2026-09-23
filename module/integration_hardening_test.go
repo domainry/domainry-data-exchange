@@ -20,6 +20,7 @@ import (
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
+	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	_ "modernc.org/sqlite"
 )
@@ -79,6 +80,7 @@ type scopedCall struct{ workspace, actor string }
 
 type integratedModuleHost struct {
 	db         *sql.DB
+	artifacts  *testArtifactStore
 	registrar  *ledgerMigrationRegistrar
 	imports    map[string]modulehost.ImportProvider
 	exports    map[string]modulehost.ExportProvider
@@ -87,6 +89,7 @@ type integratedModuleHost struct {
 }
 
 func (h *integratedModuleHost) Database() *sql.DB                         { return h.db }
+func (h *integratedModuleHost) ArtifactStore() sharedartifact.Store       { return h.artifacts }
 func (h *integratedModuleHost) Migrations() modulehost.MigrationRegistrar { return h.registrar }
 func (h *integratedModuleHost) WorkspaceContext(ctx context.Context, workspace, actor string) context.Context {
 	h.scopeMu.Lock()
@@ -121,7 +124,7 @@ func newIntegratedModuleHost(t *testing.T, imports map[string]modulehost.ImportP
 		t.Fatal(err)
 	}
 	registrar := &ledgerMigrationRegistrar{db: db}
-	return &integratedModuleHost{db: db, registrar: registrar, imports: imports, exports: exports}
+	return &integratedModuleHost{db: db, artifacts: newTestArtifactStore(t, db), registrar: registrar, imports: imports, exports: exports}
 }
 
 func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.T) {
@@ -143,7 +146,7 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 	t.Cleanup(func() { _ = binding.Close(context.Background()); _ = second.Close(context.Background()) })
 
 	var ledgerRows, ledgerTables int
-	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 10 {
+	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 7 {
 		t.Fatalf("shared host migration ledger rows=%d err=%v", ledgerRows, err)
 	}
 	if err := host.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%schema_migrations%'`).Scan(&ledgerTables); err != nil || ledgerTables != 1 {
@@ -192,9 +195,9 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 	var jobs, sourceChunks, resultChunks, artifacts int
 	for query, destination := range map[string]*int{
 		`SELECT COUNT(*) FROM _data_exchange_jobs`: &jobs,
-		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + importJob.ID + `' AND direction='source'`: &sourceChunks,
-		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + exportJob.ID + `' AND direction='result'`: &resultChunks,
-		`SELECT COUNT(*) FROM _data_exchange_artifacts WHERE job_id = '` + exportJob.ID + `'`:                         &artifacts,
+		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + importJob.ID + `' AND direction='source'`:                                                                                                                                         &sourceChunks,
+		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + exportJob.ID + `' AND direction='result'`:                                                                                                                                         &resultChunks,
+		`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.id WHERE b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id='` + exportJob.ID + `'`: &artifacts,
 	} {
 		if err := host.db.QueryRow(query).Scan(destination); err != nil {
 			t.Fatal(err)
@@ -249,7 +252,7 @@ func TestStoreTransactionsRollbackStagedContentAndTerminalWrites(t *testing.T) {
 	if !errors.Is(err, dataexchange.ErrSourceUnreadable) {
 		t.Fatalf("source error=%v", err)
 	}
-	for _, table := range []string{"_data_exchange_jobs", "_data_exchange_job_chunks", "_data_exchange_queue_scopes"} {
+	for _, table := range []string{"_data_exchange_jobs", "_data_exchange_job_chunks", "_worker_scopes"} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("%s rows=%d err=%v after rolled-back import", table, count, err)
@@ -287,7 +290,7 @@ func TestStoreTransactionsRollbackStagedContentAndTerminalWrites(t *testing.T) {
 		t.Fatalf("stale completion error=%v", err)
 	}
 	var artifactRows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_artifacts WHERE job_id=?`, job.ID).Scan(&artifactRows); err != nil || artifactRows != 0 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM _artifacts WHERE id=?`, artifact.ID).Scan(&artifactRows); err != nil || artifactRows != 0 {
 		t.Fatalf("rolled-back artifact rows=%d err=%v", artifactRows, err)
 	}
 }

@@ -51,10 +51,6 @@ func (s *adapter) Routes() []modulehttp.Route {
 	return append([]modulehttp.Route(nil), s.routes...)
 }
 
-func (s *adapter) OpenAPIOperations() map[string]map[string]any {
-	return dataexchange.DataExchangeHTTPAdapterContract().OpenAPIOperations()
-}
-
 func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, error) {
 	if binding == nil {
 		return nil, errors.New("Data Exchange HTTP binding is unavailable")
@@ -71,30 +67,22 @@ func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, e
 		dataexchange.ActionDataExchangeJobCancel:   s.cancelJob,
 		dataexchange.ActionDataExchangeJobDownload: s.downloadJob,
 	}
-	operations := s.OpenAPIOperations()
 	for _, route := range s.routes {
 		key := strings.TrimSpace(route.Action.Key)
 		handler, found := handlers[key]
 		if !found {
 			return nil, fmt.Errorf("Data Exchange Action %q has no HTTP handler", key)
 		}
-		if _, found := operations[route.Pattern()]; !found {
-			return nil, fmt.Errorf("Data Exchange Action %q has no OpenAPI operation", key)
-		}
 		s.mux.HandleFunc(route.Pattern(), handler)
 		delete(handlers, key)
-		delete(operations, route.Pattern())
 	}
-	if len(handlers) != 0 || len(operations) != 0 {
-		keys := make([]string, 0, len(handlers)+len(operations))
+	if len(handlers) != 0 {
+		keys := make([]string, 0, len(handlers))
 		for key := range handlers {
-			keys = append(keys, "handler:"+key)
-		}
-		for pattern := range operations {
-			keys = append(keys, "openapi:"+pattern)
+			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		return nil, fmt.Errorf("Data Exchange implementations have no Action manifest entries: %v", keys)
+		return nil, fmt.Errorf("Data Exchange HTTP handlers have no Action route entries: %v", keys)
 	}
 	return s, nil
 }
@@ -387,4 +375,3 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 }
 
 var _ modulehttp.Adapter = (*adapter)(nil)
-var _ modulehttp.OpenAPIProvider = (*adapter)(nil)

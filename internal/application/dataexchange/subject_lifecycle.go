@@ -13,6 +13,17 @@ import (
 
 func (b *Service) SubjectLifecycle() sdk.SubjectLifecycle { return b }
 
+// BindSubjectLifecyclePersistence enables source writes and cleanup to consult
+// the host Lifecycle module's shared subject fence and execution-step journal.
+func (b *Service) BindSubjectLifecyclePersistence() error {
+	store, ok := b.store.(repository.SubjectLifecyclePersistenceBinder)
+	if !ok {
+		return fmt.Errorf("Data Exchange shared subject lifecycle persistence unavailable")
+	}
+	store.BindSubjectLifecyclePersistence()
+	return nil
+}
+
 func (b *Service) subjectLifecycleRepository(ctx context.Context, workspace, subject string) (repository.SubjectLifecycleRepository, error) {
 	if strings.TrimSpace(workspace) == "" || workspace != requestcontext.WorkspaceID(ctx) || strings.TrimSpace(subject) == "" {
 		return nil, fmt.Errorf("Data Exchange subject lifecycle scope mismatch")
@@ -20,6 +31,10 @@ func (b *Service) subjectLifecycleRepository(ctx context.Context, workspace, sub
 	store, ok := b.store.(repository.SubjectLifecycleRepository)
 	if !ok {
 		return nil, fmt.Errorf("Data Exchange subject lifecycle unavailable")
+	}
+	bound, ok := b.store.(repository.SubjectLifecyclePersistenceBinder)
+	if !ok || !bound.SubjectLifecyclePersistenceBound() {
+		return nil, fmt.Errorf("Data Exchange shared subject lifecycle persistence is not bound")
 	}
 	return store, nil
 }

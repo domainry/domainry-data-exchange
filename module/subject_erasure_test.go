@@ -2,6 +2,7 @@ package module
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"strings"
@@ -13,8 +14,43 @@ import (
 	"github.com/domainry/domainry-foundation/requestcontext"
 )
 
+func bindSharedSubjectLifecycle(t *testing.T, binding interface{ BindSubjectLifecyclePersistence() error }, db *sql.DB) {
+	t.Helper()
+	for _, statement := range []string{
+		`CREATE TABLE _subject_requests (id TEXT NOT NULL, workspace_id TEXT NOT NULL, request_type TEXT NOT NULL, kind TEXT NOT NULL, resolved_identity TEXT NOT NULL, PRIMARY KEY(workspace_id,id))`,
+		`CREATE TABLE _subject_steps (workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, owner TEXT NOT NULL, operation TEXT NOT NULL, payload_json TEXT NOT NULL, completed_at TEXT NOT NULL, PRIMARY KEY(workspace_id,request_id,owner,operation))`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := binding.BindSubjectLifecyclePersistence(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func beginSharedSubjectErasure(t *testing.T, db *sql.DB, workspace, subject, request string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO _subject_requests(id,workspace_id,request_type,kind,resolved_identity) VALUES(?,?,'subject_request','erase',?)`, request, workspace, subject); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO _subject_steps(workspace_id,request_id,owner,operation,payload_json,completed_at) VALUES(?,?,'lifecycle','erase_fence','{}',?)`, workspace, request, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSubjectErasureFailsClosedUntilSharedLifecyclePersistenceIsBound(t *testing.T) {
+	binding, _, _, _ := openArtifactTestBindingStore(t)
+	ctx := requestcontext.WithWorkspaceID(t.Context(), "workspace")
+	request := sdk.SubjectErasureRequest{WorkspaceID: "workspace", SubjectID: "alice", RequestID: "erase-alice"}
+	if _, err := binding.SubjectLifecycle().PrepareSubjectErasure(ctx, request); err == nil || !strings.Contains(err.Error(), "not bound") {
+		t.Fatalf("unbound shared Lifecycle persistence error=%v", err)
+	}
+}
+
 func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 	binding, store, db, provider := openArtifactTestBindingStore(t)
+	bindSharedSubjectLifecycle(t, binding, db)
 	provider.content = []byte(`{"email":"PRIVATE@example.test"}`)
 	owner := sdk.Scope{WorkspaceID: "workspace", ActorID: "alice"}
 	peer := sdk.Scope{WorkspaceID: "workspace", ActorID: "bob"}
@@ -57,6 +93,7 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 	if _, err = subjects.PrepareSubjectErasure(system, held); err == nil {
 		t.Fatal("legal hold ignored")
 	}
+	beginSharedSubjectErasure(t, db, owner.WorkspaceID, owner.ActorID, request.RequestID)
 	plan, err := subjects.PrepareSubjectErasure(system, request)
 	if err != nil {
 		t.Fatal(err)
@@ -108,15 +145,25 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 	}
 	second, err := subjects.ErasePreparedSubject(system, request, plan)
 	if err != nil || !bytes.Equal(first, second) {
-		t.Fatalf("receipt replay changed: %s %v", second, err)
+		t.Fatalf("shared result-step replay changed: %s %v", second, err)
+	}
+	var sharedSteps int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM _subject_steps WHERE workspace_id=? AND request_id=? AND owner='data_exchange'`, request.WorkspaceID, request.RequestID).Scan(&sharedSteps); err != nil || sharedSteps != 2 {
+		t.Fatalf("shared subject steps=%d err=%v", sharedSteps, err)
+	}
+	for _, retired := range []string{"_data_exchange_subject_erasure_fences", "_data_exchange_subject_erasure_receipts"} {
+		var tables int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, retired).Scan(&tables); err != nil || tables != 0 {
+			t.Fatalf("retired subject table %s count=%d err=%v", retired, tables, err)
+		}
 	}
 	for _, job := range []sdk.Job{jobs[0], importJob} {
 		var count int
 		if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, owner.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("chunks remain=%d err=%v", count, err)
 		}
-		if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_artifacts WHERE workspace_id=? AND job_id=?`, owner.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("artifact remains=%d err=%v", count, err)
+		if err = db.QueryRow(`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.id WHERE b.workspace_id=? AND b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id=? AND a.status<>'deleted'`, owner.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("active shared artifact remains=%d err=%v", count, err)
 		}
 		var payload []byte
 		var key, code, status string
@@ -145,6 +192,7 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 
 func TestSubjectErasureBlocksRunningJobAndFencesStaleWorker(t *testing.T) {
 	binding, store, db, _ := openArtifactTestBindingStore(t)
+	bindSharedSubjectLifecycle(t, binding, db)
 	scope := sdk.Scope{WorkspaceID: "workspace", ActorID: "alice"}
 	job, _, err := binding.SubmitExport(t.Context(), sdk.ExportRequest{Scope: scope, Provider: "identity", ObjectKey: "user", IdempotencyKey: "running"})
 	if err != nil {
@@ -157,6 +205,7 @@ func TestSubjectErasureBlocksRunningJobAndFencesStaleWorker(t *testing.T) {
 	system := requestcontext.WithWorkspaceID(t.Context(), scope.WorkspaceID)
 	subjects := binding.SubjectLifecycle()
 	request := sdk.SubjectErasureRequest{WorkspaceID: scope.WorkspaceID, SubjectID: scope.ActorID, RequestID: "erase-running"}
+	beginSharedSubjectErasure(t, db, scope.WorkspaceID, scope.ActorID, request.RequestID)
 	if _, err = subjects.PrepareSubjectErasure(system, request); err == nil {
 		t.Fatal("running job ignored")
 	}
@@ -179,10 +228,11 @@ func TestSubjectErasureBlocksRunningJobAndFencesStaleWorker(t *testing.T) {
 	if err = store.Heartbeat(t.Context(), x, time.Minute); err == nil {
 		t.Fatal("stale worker retained lease")
 	}
-	for _, table := range []string{"_data_exchange_artifacts", "_data_exchange_job_chunks"} {
-		var count int
-		if err = db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE workspace_id=? AND job_id=?", scope.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("stale write survived in %s: %d %v", table, count, err)
-		}
+	var count int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, scope.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("stale chunk write survived: %d %v", count, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM _artifacts WHERE workspace_id=? AND id='stale-artifact'`, scope.WorkspaceID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("stale shared artifact write survived: %d %v", count, err)
 	}
 }

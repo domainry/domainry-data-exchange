@@ -14,9 +14,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	sourcecapability "github.com/domainry/domainry-data-exchange/capability"
 	"github.com/domainry/domainry-foundation/apperror"
-	"github.com/domainry/domainry-foundation/modulecapability"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
@@ -48,7 +46,6 @@ func (h semanticHost) ExportProvider(key string) (modulehost.ExportProvider, boo
 }
 
 type semanticTransport struct {
-	modulecapability.Binding
 	connected      modulehost.Host
 	application    dataexchange.ApplicationRef
 	lastJobRequest dataexchange.JobRequest
@@ -110,13 +107,9 @@ func (t *semanticTransport) Download(_ context.Context, application dataexchange
 }
 func (*semanticTransport) Close(context.Context, dataexchange.ApplicationRef) error { return nil }
 
-func openSemanticBinding(t *testing.T, host semanticHost, configure func(*semanticTransport)) (dataexchange.Binding, *semanticTransport, modulecapability.Binding) {
+func openSemanticBinding(t *testing.T, host semanticHost, configure func(*semanticTransport)) (dataexchange.Binding, *semanticTransport) {
 	t.Helper()
-	direct, err := sourcecapability.Open(sourcecapability.Inputs{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	transport := &semanticTransport{Binding: direct}
+	transport := &semanticTransport{}
 	if configure != nil {
 		configure(transport)
 	}
@@ -125,7 +118,7 @@ func openSemanticBinding(t *testing.T, host semanticHost, configure func(*semant
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = binding.Close(context.Background()) })
-	return binding, transport, direct
+	return binding, transport
 }
 
 func remoteRequest(method, target string, permission string) *http.Request {
@@ -163,7 +156,7 @@ func TestSaaSSurfacePreservesRemoteSemanticsErrorsAndFileBoundary(t *testing.T) 
 	}
 	t.Run("transport download", func(t *testing.T) {
 		content := "remote-owned\n"
-		binding, transport, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, func(transport *semanticTransport) {
+		binding, transport := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, func(transport *semanticTransport) {
 			transport.job = completed
 			transport.artifact = dataexchange.Artifact{
 				Filename: "remote.csv", ContentType: "text/csv", Size: int64(len(content)), ExpiresAt: time.Now().UTC().Add(time.Hour),
@@ -181,7 +174,7 @@ func TestSaaSSurfacePreservesRemoteSemanticsErrorsAndFileBoundary(t *testing.T) 
 	})
 
 	t.Run("provider-owned file delivery", func(t *testing.T) {
-		binding, transport, _ := openSemanticBinding(t, semanticHost{exporter: fileExportProvider{}}, func(transport *semanticTransport) {
+		binding, transport := openSemanticBinding(t, semanticHost{exporter: fileExportProvider{}}, func(transport *semanticTransport) {
 			transport.job = completed
 			transport.artifact = dataexchange.Artifact{Content: io.NopCloser(strings.NewReader("must-not-be-read"))}
 		})
@@ -220,7 +213,7 @@ func TestSaaSSurfacePreservesRemoteSemanticsErrorsAndFileBoundary(t *testing.T) 
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			binding, _, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, test.configure)
+			binding, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, test.configure)
 			response := httptest.NewRecorder()
 			remoteAdapter(t, binding).Handler().ServeHTTP(response, remoteRequest(test.method, test.target, test.permission))
 			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
@@ -231,7 +224,7 @@ func TestSaaSSurfacePreservesRemoteSemanticsErrorsAndFileBoundary(t *testing.T) 
 }
 
 func TestSaaSBindingForwardsTransferEnvelopesWithoutBuffering(t *testing.T) {
-	binding, transport, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, nil)
+	binding, transport := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, nil)
 	scope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "actor", RoleKey: "member", RequestID: "request-1"}
 	source := strings.NewReader("id\n1\n")
 	importRequest := dataexchange.ImportRequest{
@@ -259,7 +252,7 @@ func TestSaaSBindingForwardsTransferEnvelopesWithoutBuffering(t *testing.T) {
 }
 
 func TestSaaSBindingPreservesTypedIdempotencyConflictFromTransport(t *testing.T) {
-	binding, transport, _ := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, func(transport *semanticTransport) {
+	binding, transport := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, func(transport *semanticTransport) {
 		transport.importErr = fmt.Errorf("remote import: %w", dataexchange.ErrIdempotencyKeyReused)
 		transport.exportErr = fmt.Errorf("remote export: %w", dataexchange.ErrIdempotencyKeyReused)
 	})
@@ -271,42 +264,6 @@ func TestSaaSBindingPreservesTypedIdempotencyConflictFromTransport(t *testing.T)
 	}
 	if !reflect.DeepEqual(transport.calls, []string{"submit_import", "submit_export"}) {
 		t.Fatalf("transport calls=%v", transport.calls)
-	}
-}
-
-func TestSaaSBindingKeepsCapabilityAndValidationParity(t *testing.T) {
-	binding, _, direct := openSemanticBinding(t, semanticHost{exporter: pageExportProvider{}}, nil)
-	directSummary, err := direct.CapabilitySummary(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	remoteSummary, err := binding.CapabilitySummary(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	directJSON, err := modulecapability.CanonicalJSON(directSummary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	remoteJSON, err := modulecapability.CanonicalJSON(remoteSummary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(directJSON) != string(remoteJSON) {
-		t.Fatalf("capability summaries differ\ndirect=%s\nremote=%s", directJSON, remoteJSON)
-	}
-	request := modulecapability.ValidationRequest{
-		ContractVersion: modulecapability.ValidationContractVersion, ModuleKey: directSummary.Identity.Key,
-		CategoryKey: "data_exchange.transfer", ContractSHA256: directSummary.Identity.ContractSHA256,
-		Kind: "data_exchange.validation_schema", Candidate: modulecapability.AuthoringFragment{Collection: "model.fields", Key: "import", Value: []byte(`{}`)},
-	}
-	directResult, directErr := direct.ValidateCapabilityCandidate(t.Context(), request)
-	remoteResult, remoteErr := binding.ValidateCapabilityCandidate(t.Context(), request)
-	if !reflect.DeepEqual(directResult, remoteResult) || (directErr == nil) != (remoteErr == nil) || (directErr != nil && directErr.Error() != remoteErr.Error()) {
-		t.Fatalf("validation parity direct=(%+v,%v) remote=(%+v,%v)", directResult, directErr, remoteResult, remoteErr)
-	}
-	if directErr == nil || !strings.Contains(directErr.Error(), "validation_scope_invalid") {
-		t.Fatalf("validation outside declared scopes was accepted: %v", directErr)
 	}
 }
 

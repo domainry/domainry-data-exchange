@@ -11,38 +11,57 @@ import (
 	"hash"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
 	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
+	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 	"github.com/domainry/domainry-orm/query"
 )
 
 const sourceChunkBytes = 1 << 20
 
+const dataExchangeWorkerScopeOwner = "data_exchange"
+
 type Store struct {
 	db               *sql.DB
 	engine           persistenceengine.Engine
 	renderer         ormdialect.Renderer
+	artifacts        sharedartifact.Store
 	workspaceContext func(context.Context, string, string) context.Context
+	subjectLifecycle atomic.Bool
 }
 
 var _ dataexchangerepository.JobRepository = (*Store)(nil)
 
-func NewStore(db *sql.DB, engine persistenceengine.Engine, schema string, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
+func NewStore(db *sql.DB, engine persistenceengine.Engine, schema string, artifacts sharedartifact.Store, workspaceContext func(context.Context, string, string) context.Context) (*Store, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("Data Exchange database engine is required")
 	}
-	return &Store{db: db, engine: engine, renderer: engine.Dialect().WithSchema(schema), workspaceContext: workspaceContext}, nil
+	if artifacts == nil {
+		return nil, fmt.Errorf("Data Exchange shared Artifact store is required")
+	}
+	return &Store{db: db, engine: engine, renderer: engine.Dialect().WithSchema(schema), artifacts: artifacts, workspaceContext: workspaceContext}, nil
 }
 func (s *Store) Scoped(ctx context.Context, workspace, actor string) context.Context {
 	if s.workspaceContext != nil {
 		return s.workspaceContext(ctx, workspace, actor)
 	}
 	return ctx
+}
+
+func (s *Store) BindSubjectLifecyclePersistence() {
+	if s != nil {
+		s.subjectLifecycle.Store(true)
+	}
+}
+
+func (s *Store) SubjectLifecyclePersistenceBound() bool {
+	return s != nil && s.subjectLifecycle.Load()
 }
 func jobID(scope dataexchange.Scope, provider, operation, objectKey, key string) string {
 	d := sha256.Sum256([]byte(scope.WorkspaceID + "\x00" + scope.ActorID + "\x00" + provider + "\x00" + operation + "\x00" + objectKey + "\x00" + key))
@@ -75,9 +94,11 @@ func execute(ctx context.Context, executor sqlExecer, statement statementBuilder
 
 func (s *Store) registerScope(ctx context.Context, executor sqlExecer, workspace string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	insert := query.NewInsertBuilder(s.renderer, "_data_exchange_queue_scopes").
-		Columns("scope_key", "updated_at").Values(workspace, now)
-	insert, err := s.engine.ApplyUpsert(insert, []string{"scope_key"}, query.Assign("updated_at", now))
+	digest := sha256.Sum256([]byte(dataExchangeWorkerScopeOwner + "\x00" + workspace))
+	id := "worker_scope:" + hex.EncodeToString(digest[:12])
+	insert := query.NewInsertBuilder(s.renderer, "_worker_scopes").
+		Columns("id", "owner", "scope_key", "updated_at").Values(id, dataExchangeWorkerScopeOwner, workspace, now)
+	insert, err := s.engine.ApplyUpsert(insert, []string{"owner", "scope_key"}, query.Assign("updated_at", now))
 	if err != nil {
 		return err
 	}
@@ -96,7 +117,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
 	id := jobID(r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey)
 	stagingID := fmt.Sprintf("%s:staging:%d", id, time.Now().UTC().UnixNano())
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return dataexchange.Job{}, false, err
 	}
@@ -216,7 +237,7 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 	}
 	hash := fingerprint([]byte(r.Provider), []byte(r.ObjectKey), []byte(strings.TrimSpace(r.ReferenceID)), payload)
 	now := time.Now().UTC()
-	tx, beginErr := s.db.BeginTx(ctx, nil)
+	tx, beginErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if beginErr != nil {
 		return dataexchange.Job{}, false, beginErr
 	}
@@ -431,7 +452,7 @@ func columnEqual(alias, column string, value any) query.Predicate {
 }
 
 func (s *Store) Claim(ctx context.Context, owner string, ttl time.Duration) (dataexchangemodel.WorkItem, bool, error) {
-	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_queue_scopes").Columns("scope_key").OrderBy(query.Ascending("updated_at"), query.Ascending("scope_key")).Build()
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_worker_scopes").Columns("scope_key").Where(query.Equal("owner", dataExchangeWorkerScopeOwner)).OrderBy(query.Ascending("updated_at"), query.Ascending("scope_key")).Build()
 	if err != nil {
 		return dataexchangemodel.WorkItem{}, false, err
 	}
@@ -631,6 +652,7 @@ func fencedJob(x dataexchangemodel.WorkItem) query.Predicate {
 }
 
 func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *dataexchangemodel.ArtifactRecord) error {
+	ctx = s.Scoped(ctx, x.Scope.WorkspaceID, "data-exchange-worker")
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -638,13 +660,24 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 	defer tx.Rollback()
 	aid := ""
 	if a != nil {
-		aid = a.ID
-		insert := query.NewInsertBuilder(s.renderer, "_data_exchange_artifacts").
-			Columns("id", "workspace_id", "job_id", "filename", "content_type", "content_sha256", "size_bytes", "expires_at", "created_at").
-			Values(a.ID, x.Scope.WorkspaceID, x.Job.ID, a.Filename, a.ContentType, a.SHA256, a.Size, a.ExpiresAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
-		if _, e = execute(ctx, tx, insert); e != nil {
+		now := time.Now().UTC()
+		metadata, binding, buildErr := dataExchangeArtifact(x, *a, now)
+		if buildErr != nil {
+			return buildErr
+		}
+		sharedContext := sharedartifact.WithExecutor(ctx, tx)
+		persisted, _, registerErr := s.artifacts.Register(sharedContext, metadata)
+		if registerErr != nil {
+			return registerErr
+		}
+		if persisted.ID != metadata.ID || persisted.Owner != sharedartifact.OwnerDataExchange || persisted.Kind != "output" {
+			return fmt.Errorf("Data Exchange shared artifact identity conflict")
+		}
+		binding.ArtifactID = persisted.ID
+		if _, _, e = s.artifacts.Bind(sharedContext, binding); e != nil {
 			return e
 		}
+		aid = persisted.ID
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
 		Set("error_code", "").Set("next_attempt_at", "").Set("lease_owner", "").Set("lease_expires_at", "").
@@ -658,6 +691,28 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 		return fmt.Errorf("Data Exchange job %s is no longer running", x.Job.ID)
 	}
 	return tx.Commit()
+}
+
+func dataExchangeArtifact(x dataexchangemodel.WorkItem, value dataexchangemodel.ArtifactRecord, now time.Time) (sharedartifact.Artifact, sharedartifact.Binding, error) {
+	metadata, err := json.Marshal(map[string]string{
+		"job_id": x.Job.ID, "provider": x.Job.Provider, "operation": x.Job.Operation, "object_key": x.ObjectKey,
+	})
+	if err != nil {
+		return sharedartifact.Artifact{}, sharedartifact.Binding{}, err
+	}
+	bindingID := "data-exchange-job-artifact:" + fingerprint([]byte(x.Scope.WorkspaceID), []byte(x.Job.ID), []byte(value.ID))
+	return sharedartifact.Artifact{
+			ID: value.ID, WorkspaceID: x.Scope.WorkspaceID, Owner: sharedartifact.OwnerDataExchange, Kind: "output",
+			IdempotencyKey: "job:" + x.Job.ID + ":output", CreatedBy: "data-exchange-worker",
+			Filename: value.Filename, MediaType: value.ContentType, ContentSHA256: value.SHA256, SizeBytes: value.Size,
+			StorageReference: "data-exchange-job-chunks:" + x.Scope.WorkspaceID + ":" + x.Job.ID + ":result",
+			Status:           sharedartifact.StatusAvailable, ExpiresAt: value.ExpiresAt, ScanStatus: sharedartifact.ScanNotRequired,
+			Metadata: metadata, CreatedAt: now, UpdatedAt: now,
+		}, sharedartifact.Binding{
+			ID: bindingID, WorkspaceID: x.Scope.WorkspaceID, Owner: sharedartifact.OwnerDataExchange,
+			Kind: sharedartifact.BindingJob, ResourceType: "data_exchange_job", ResourceID: x.Job.ID,
+			Metadata: json.RawMessage(`{}`), CreatedAt: now,
+		}, nil
 }
 func (s *Store) Fail(ctx context.Context, x dataexchangemodel.WorkItem, plan dataexchangemodel.FailurePlan) error {
 	now := time.Now().UTC()
@@ -702,39 +757,45 @@ func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest, access 
 		return dataexchange.Artifact{}, dataexchange.ErrJobNotFound
 	}
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	var a dataexchange.Artifact
-	var expiresAt string
-	queryValue, args, buildErr := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_artifacts", access.WorkspaceID).Alias("a").Projections(
-		query.Project(query.QualifiedColumn("a", "id")), query.Project(query.QualifiedColumn("a", "filename")),
-		query.Project(query.QualifiedColumn("a", "content_type")), query.Project(query.QualifiedColumn("a", "content_sha256")),
-		query.Project(query.QualifiedColumn("a", "size_bytes")), query.Project(query.QualifiedColumn("a", "expires_at")),
-	).Join(query.InnerJoin("_data_exchange_jobs", "j", query.And(
-		query.EqualExpressions(query.QualifiedColumn("j", "id"), query.QualifiedColumn("a", "job_id")),
-		query.EqualExpressions(query.QualifiedColumn("j", "workspace_id"), query.QualifiedColumn("a", "workspace_id")),
-	))).Where(query.And(
-		jobCandidatePredicate(r, access, "j"), query.EqualValue(query.QualifiedColumn("j", "status"), "completed"),
-	)).Build()
-	if buildErr != nil {
-		return a, buildErr
+	job, err := s.Job(ctx, r, access)
+	if err != nil || job.Status != "completed" || strings.TrimSpace(job.ArtifactID) == "" {
+		return dataexchange.Artifact{}, dataexchange.ErrJobNotFound
 	}
-	if e := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&a.ID, &a.Filename, &a.ContentType, &a.SHA256, &a.Size, &expiresAt); e != nil {
-		if errors.Is(e, sql.ErrNoRows) {
-			return a, dataexchange.ErrJobNotFound
+	stored, found, err := s.artifacts.ByID(ctx, access.WorkspaceID, job.ArtifactID)
+	if err != nil {
+		return dataexchange.Artifact{}, err
+	}
+	if !found || stored.Owner != sharedartifact.OwnerDataExchange || stored.Kind != "output" {
+		return dataexchange.Artifact{}, dataexchange.ErrJobNotFound
+	}
+	bindings, err := s.artifacts.Bindings(ctx, access.WorkspaceID, stored.ID)
+	if err != nil {
+		return dataexchange.Artifact{}, err
+	}
+	bound := false
+	for _, binding := range bindings {
+		if binding.Owner == sharedartifact.OwnerDataExchange && binding.Kind == sharedartifact.BindingJob && binding.ResourceType == "data_exchange_job" && binding.ResourceID == job.ID {
+			bound = true
+			break
 		}
-		return a, e
 	}
-	var e error
-	a.ExpiresAt, e = time.Parse(time.RFC3339Nano, expiresAt)
-	if e != nil || a.Size < 0 || strings.TrimSpace(a.SHA256) == "" {
+	if !bound {
+		return dataexchange.Artifact{}, fmt.Errorf("%w: shared artifact has no Data Exchange job binding", dataexchange.ErrContentCorrupt)
+	}
+	a := dataexchange.Artifact{ID: stored.ID, Filename: stored.Filename, ContentType: stored.MediaType, SHA256: stored.ContentSHA256, Size: stored.SizeBytes, ExpiresAt: stored.ExpiresAt}
+	if a.Size < 0 || strings.TrimSpace(a.SHA256) == "" || stored.Status == sharedartifact.StatusDeleted || stored.Status == sharedartifact.StatusRejected {
 		return dataexchange.Artifact{}, fmt.Errorf("%w: artifact metadata is invalid", dataexchange.ErrContentCorrupt)
 	}
-	if !time.Now().UTC().Before(a.ExpiresAt) {
+	if stored.Status == sharedartifact.StatusExpired || !time.Now().UTC().Before(a.ExpiresAt) {
 		a.Content = errorReadCloser{err: dataexchange.ErrArtifactExpired}
 		return a, nil
 	}
-	content, e := s.Chunks(ctx, r.Scope.WorkspaceID, r.JobID, "result")
-	if e != nil {
-		return a, e
+	if stored.Status != sharedartifact.StatusAvailable {
+		return dataexchange.Artifact{}, fmt.Errorf("%w: artifact is unavailable", dataexchange.ErrContentCorrupt)
+	}
+	content, err := s.Chunks(ctx, r.Scope.WorkspaceID, r.JobID, "result")
+	if err != nil {
+		return a, err
 	}
 	a.Content = &verifyingReadCloser{source: content, digest: sha256.New(), expectedSHA: strings.ToLower(strings.TrimSpace(a.SHA256)), expectedSize: a.Size}
 	return a, nil

@@ -3,16 +3,11 @@ package remote
 import (
 	"context"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	sourcecapability "github.com/domainry/domainry-data-exchange/capability"
-	"github.com/domainry/domainry-foundation/modulecapability"
-	"github.com/domainry/domainry-foundation/modulecapability/contracttest"
 	"github.com/domainry/domainry-foundation/modulehttp"
 )
 
@@ -22,7 +17,6 @@ func (remoteTestHost) ImportProvider(string) (modulehost.ImportProvider, bool) {
 func (remoteTestHost) ExportProvider(string) (modulehost.ExportProvider, bool) { return nil, false }
 
 type remoteTestTransport struct {
-	modulecapability.Binding
 	connected modulehost.Host
 	source    io.Reader
 }
@@ -54,32 +48,11 @@ func (*remoteTestTransport) Close(context.Context, dataexchange.ApplicationRef) 
 
 func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 	host := remoteTestHost{}
-	direct, err := sourcecapability.Open(sourcecapability.Inputs{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler, err := modulecapability.NewHTTPHandler(direct, func(*http.Request) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	summary, err := direct.CapabilitySummary(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	remoteCapability, err := modulecapability.OpenRemote(t.Context(), modulecapability.RemoteConfig{
-		BaseURL: server.URL, Client: server.Client(), ExpectedModuleKey: "data_exchange", ExpectedContractSHA256: summary.Identity.ContractSHA256,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	transport := &remoteTestTransport{Binding: remoteCapability}
+	transport := &remoteTestTransport{}
 	binding, err := NewFactory(transport).OpenSaaS(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host)
 	if err != nil {
 		t.Fatal(err)
 	}
-	contracttest.VerifyBinding(t, binding)
 	if transport.connected == nil {
 		t.Fatal("provider host was not connected")
 	}
@@ -94,20 +67,5 @@ func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 	provider, ok := binding.(modulehttp.Provider)
 	if !ok || len(provider.HTTPAdapters()) != 1 {
 		t.Fatal("Data Exchange SaaS binding does not expose the owner HTTP adapter")
-	}
-}
-
-func TestSaaSBindingRejectsDifferentCapabilityBeforeConnecting(t *testing.T) {
-	different, err := contracttest.NewFixtureBinding("data_exchange")
-	if err != nil {
-		t.Fatal(err)
-	}
-	transport := &remoteTestTransport{Binding: different}
-	_, err = NewFactory(transport).OpenSaaS(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, remoteTestHost{})
-	if err == nil || !strings.Contains(err.Error(), "contract_mismatch") {
-		t.Fatalf("OpenSaaS() error = %v", err)
-	}
-	if transport.connected != nil {
-		t.Fatal("Data Exchange connected a SaaS transport before capability verification")
 	}
 }

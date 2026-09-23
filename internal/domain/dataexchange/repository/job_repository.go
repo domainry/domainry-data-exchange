@@ -30,10 +30,15 @@ type JobRepository interface {
 	Scoped(context.Context, string, string) context.Context
 }
 
-// SubjectLifecycleRepository keeps subject fences, frozen plans and erasure
-// receipts inside the source module that owns jobs and their durable content.
+// SubjectLifecycleRepository keeps only Data Exchange cleanup behavior. The
+// host Lifecycle owner persists fences, frozen plans and owner results.
 type SubjectLifecycleRepository interface {
 	PreviewSubject(context.Context, string, string) (json.RawMessage, error)
 	PrepareSubjectErasure(context.Context, dataexchange.SubjectErasureRequest) (json.RawMessage, error)
 	ErasePreparedSubject(context.Context, dataexchange.SubjectErasureRequest, json.RawMessage) (json.RawMessage, error)
+}
+
+type SubjectLifecyclePersistenceBinder interface {
+	BindSubjectLifecyclePersistence()
+	SubjectLifecyclePersistenceBound() bool
 }

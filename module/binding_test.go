@@ -21,6 +21,7 @@ import (
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
+	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 	_ "modernc.org/sqlite"
@@ -136,12 +137,14 @@ func (p *testExportProvider) CompleteExport(_ context.Context, completion dataex
 }
 
 type testHost struct {
-	db      *sql.DB
-	imports map[string]modulehost.ImportProvider
-	exports map[string]modulehost.ExportProvider
+	db        *sql.DB
+	artifacts *testArtifactStore
+	imports   map[string]modulehost.ImportProvider
+	exports   map[string]modulehost.ExportProvider
 }
 
 func (h *testHost) Database() *sql.DB                                                 { return h.db }
+func (h *testHost) ArtifactStore() sharedartifact.Store                               { return h.artifacts }
 func (h *testHost) WorkspaceContext(ctx context.Context, _, _ string) context.Context { return ctx }
 func (h *testHost) Migrations() modulehost.MigrationRegistrar                         { return &testMigrations{db: h.db} }
 func (h *testHost) ImportProvider(k string) (modulehost.ImportProvider, bool) {
@@ -163,7 +166,7 @@ func openTestBinding(t *testing.T) (dataexchange.Binding, *testImportProvider, *
 	t.Cleanup(func() { _ = db.Close() })
 	ip := &testImportProvider{}
 	ep := &testExportProvider{}
-	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": ip}, exports: map[string]modulehost.ExportProvider{"records": ep}}
+	h := &testHost{db: db, artifacts: newTestArtifactStore(t, db), imports: map[string]modulehost.ImportProvider{"records": ip}, exports: map[string]modulehost.ExportProvider{"records": ep}}
 	binding, err := NewFactory(Options{}).OpenModule(context.Background(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, h)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +184,7 @@ func openArtifactTestBinding(t *testing.T) (dataexchange.Binding, *testArtifactI
 	t.Cleanup(func() { _ = db.Close() })
 	imports := &testArtifactImportProvider{}
 	exports := &testArtifactExportProvider{}
-	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
+	host := &testHost{db: db, artifacts: newTestArtifactStore(t, db), imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
 	binding, err := NewFactory(Options{}).OpenModule(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host)
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +202,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	t.Cleanup(func() { _ = db.Close() })
 	imports := &testArtifactImportProvider{}
 	exports := &testArtifactExportProvider{}
-	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
+	host := &testHost{db: db, artifacts: newTestArtifactStore(t, db), imports: map[string]modulehost.ImportProvider{"identity": imports}, exports: map[string]modulehost.ExportProvider{"identity": exports}}
 	engine, err := persistenceengine.NewEngine("sqlite")
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +214,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	if err := host.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
-	store, err := persistence.NewStore(db, engine, "", host.WorkspaceContext)
+	store, err := persistence.NewStore(db, engine, "", host.ArtifactStore(), host.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +229,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	h := &testHost{db: db, imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
+	h := &testHost{db: db, artifacts: newTestArtifactStore(t, db), imports: map[string]modulehost.ImportProvider{"records": &testImportProvider{}}, exports: map[string]modulehost.ExportProvider{"records": &testExportProvider{}}}
 	engine, err := persistenceengine.NewEngine("sqlite")
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +241,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	if err := h.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
-	store, err := persistence.NewStore(db, engine, "", h.WorkspaceContext)
+	store, err := persistence.NewStore(db, engine, "", h.ArtifactStore(), h.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +429,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	host := &testHost{db: db, imports: map[string]modulehost.ImportProvider{}, exports: map[string]modulehost.ExportProvider{"reports": &testExportProvider{}}}
+	host := &testHost{db: db, artifacts: newTestArtifactStore(t, db), imports: map[string]modulehost.ImportProvider{}, exports: map[string]modulehost.ExportProvider{"reports": &testExportProvider{}}}
 	binding, err := NewFactory(Options{}).OpenModule(t.Context(), dataexchange.ApplicationRef{ApplicationID: "app", RuntimeID: "runtime"}, host)
 	if err != nil {
 		t.Fatal(err)
@@ -499,7 +502,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("missing-grant get status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
@@ -700,7 +703,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 
 	t.Run("expired", func(t *testing.T) {
 		binding, db, scope, jobID := completeExport(t)
-		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), jobID); err != nil {
+		if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), jobID); err != nil {
 			t.Fatal(err)
 		}
 		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
@@ -730,7 +733,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 
 	t.Run("artifact identity", func(t *testing.T) {
 		binding, db, scope, jobID := completeExport(t)
-		if _, err := db.Exec(`UPDATE _data_exchange_artifacts SET size_bytes=size_bytes+1 WHERE job_id=?`, jobID); err != nil {
+		if _, err := db.Exec(`UPDATE _artifacts SET size_bytes=size_bytes+1 WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, jobID); err != nil {
 			t.Fatal(err)
 		}
 		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})

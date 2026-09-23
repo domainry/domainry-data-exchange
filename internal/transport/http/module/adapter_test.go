@@ -120,9 +120,6 @@ func TestSurfaceDeclaresAndServesSafeJobManagement(t *testing.T) {
 	if routes := adapter.Routes(); len(routes) != 4 || routes[0].Pattern() != "GET /data-exchange/jobs" || routes[1].Pattern() != "GET /data-exchange/jobs/{jobID}" || routes[0].Action.Authorization.Strategy != actioncontract.AuthorizationAuthenticated || routes[0].Action.Permission == nil || routes[0].Action.Permission.Key != routes[0].Action.Key || routes[0].Action.Exposures[0] != modulehttp.ExposurePublic || routes[2].Action.IdempotencyDecision != "natural_key" || routes[3].Pattern() != "GET /data-exchange/jobs/{jobID}/download" {
 		t.Fatalf("routes=%+v", routes)
 	}
-	if operations := adapter.(modulehttp.OpenAPIProvider).OpenAPIOperations(); operations["GET /data-exchange/jobs/{jobID}"]["operationId"] != "getDataExchangeJob" || hasOpenAPIParameter(operations["POST /data-exchange/jobs/{jobID}/cancel"], "Idempotency-Key") {
-		t.Fatalf("OpenAPI operations=%#v", operations)
-	}
 	response := httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, requestWithPermissions(http.MethodGet, "/data-exchange/jobs?provider=records&operation=export&status=completed&limit=20", dataexchange.ActionDataExchangeJobList))
 	if response.Code != http.StatusOK || probe.lastList.Scope.ActorID != "actor" || probe.lastList.Provider != "records" || probe.lastList.Operation != "export" || probe.lastList.Status != "completed" || probe.lastList.Limit != 20 {
@@ -270,16 +267,6 @@ func (missingProviderHost) ImportProvider(string) (modulehost.ImportProvider, bo
 }
 func (missingProviderHost) ExportProvider(string) (modulehost.ExportProvider, bool) {
 	return nil, false
-}
-
-func hasOpenAPIParameter(operation map[string]any, name string) bool {
-	parameters, _ := operation["parameters"].([]map[string]any)
-	for _, parameter := range parameters {
-		if parameter["name"] == name {
-			return true
-		}
-	}
-	return false
 }
 
 var _ jobBinding = (*bindingProbe)(nil)
