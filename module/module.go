@@ -3,7 +3,9 @@
 package module
 
 import (
+	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
 	moduleassembly "github.com/domainry/domainry-data-exchange/internal/assembly/module"
+	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 	"github.com/domainry/domainry-foundation/schemaownership"
 )
@@ -18,3 +20,13 @@ var NewFactory = moduleassembly.NewFactory
 func SchemaOwnership() []schemaownership.Table { return persistenceschema.SchemaOwnership() }
 
 func OwnedTables() []string { return schemaownership.Names(SchemaOwnership()) }
+
+// SchemaMigrations exposes the same source-owned DDL used by Module startup for
+// cross-module composition verification without exposing a persistence Store.
+func SchemaMigrations(driver, schema string) ([]modulehost.Migration, error) {
+	engine, err := persistenceengine.NewEngine(driver)
+	if err != nil {
+		return nil, err
+	}
+	return persistenceschema.SchemaMigrations(engine, schema)
+}

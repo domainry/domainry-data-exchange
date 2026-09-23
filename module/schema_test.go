@@ -112,6 +112,25 @@ func TestModulePublishesOnlyDataExchangeOwnedSchema(t *testing.T) {
 	}
 }
 
+func TestModulePublishesCanonicalDataExchangeMigrations(t *testing.T) {
+	migrations, err := SchemaMigrations("sqlite", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != len(OwnedTables()) {
+		t.Fatalf("Data Exchange migrations=%d owned tables=%d", len(migrations), len(OwnedTables()))
+	}
+	for _, table := range OwnedTables() {
+		found := false
+		for _, migration := range migrations {
+			found = found || strings.Contains(migration.SQL, `CREATE TABLE "`+table+`"`)
+		}
+		if !found {
+			t.Fatalf("canonical Data Exchange migrations omit %s", table)
+		}
+	}
+}
+
 func TestSchemaOwnsNoSubjectLifecycleFenceOrReceipt(t *testing.T) {
 	for _, driver := range []string{"sqlite", "mysql", "postgres"} {
 		engine, err := persistenceengine.NewEngine(driver)
