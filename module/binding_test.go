@@ -21,7 +21,6 @@ import (
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistence "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/dataexchange"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
-	sharedartifact "github.com/domainry/domainry-foundation/artifact"
 	"github.com/domainry/domainry-foundation/modulehttp"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 	_ "modernc.org/sqlite"
@@ -144,7 +143,6 @@ type testHost struct {
 }
 
 func (h *testHost) Database() *sql.DB                                                 { return h.db }
-func (h *testHost) ArtifactStore() sharedartifact.Store                               { return h.artifacts }
 func (h *testHost) WorkspaceContext(ctx context.Context, _, _ string) context.Context { return ctx }
 func (h *testHost) Migrations() modulehost.MigrationRegistrar                         { return &testMigrations{db: h.db} }
 func (h *testHost) ImportProvider(k string) (modulehost.ImportProvider, bool) {
@@ -214,7 +212,7 @@ func openArtifactTestBindingStore(t *testing.T) (*exchange.Binding, *persistence
 	if err := host.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
-	store, err := persistence.NewStore(db, engine, "", host.ArtifactStore(), host.WorkspaceContext)
+	store, err := persistence.NewStore(db, engine, "", host.artifacts, host.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +239,7 @@ func openTestBindingStore(t *testing.T) (dataexchange.Binding, *persistence.Stor
 	if err := h.Migrations().ApplyOwnedMigrations(t.Context(), "data_exchange", migrations); err != nil {
 		t.Fatal(err)
 	}
-	store, err := persistence.NewStore(db, engine, "", h.ArtifactStore(), h.WorkspaceContext)
+	store, err := persistence.NewStore(db, engine, "", h.artifacts, h.WorkspaceContext)
 	if err != nil {
 		t.Fatal(err)
 	}

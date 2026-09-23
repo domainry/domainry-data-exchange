@@ -20,7 +20,7 @@ func newTestArtifactStore(t *testing.T, db *sql.DB) *testArtifactStore {
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS _artifacts (
 workspace_id TEXT NOT NULL, id TEXT PRIMARY KEY, owner TEXT NOT NULL, kind TEXT NOT NULL,
-idempotency_key TEXT NOT NULL, created_by TEXT NOT NULL, filename TEXT NOT NULL,
+idempotency_key TEXT NOT NULL, created_by TEXT NOT NULL, owner_org_id TEXT NOT NULL DEFAULT '', filename TEXT NOT NULL,
 media_type TEXT NOT NULL, content_sha256 TEXT NOT NULL, size_bytes BIGINT NOT NULL,
 storage_reference TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL DEFAULT '',
 scan_status TEXT NOT NULL, download_token_sha256 TEXT NOT NULL DEFAULT '',

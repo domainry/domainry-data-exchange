@@ -38,7 +38,7 @@ func (r *ledgerMigrationRegistrar) ApplyOwnedMigrations(ctx context.Context, own
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
-	if owner != "data_exchange" {
+	if owner != "data_exchange" && owner != sharedartifact.MigrationOwner {
 		return fmt.Errorf("unexpected migration owner %q", owner)
 	}
 	for _, migration := range migrations {
@@ -89,7 +89,6 @@ type integratedModuleHost struct {
 }
 
 func (h *integratedModuleHost) Database() *sql.DB                         { return h.db }
-func (h *integratedModuleHost) ArtifactStore() sharedartifact.Store       { return h.artifacts }
 func (h *integratedModuleHost) Migrations() modulehost.MigrationRegistrar { return h.registrar }
 func (h *integratedModuleHost) WorkspaceContext(ctx context.Context, workspace, actor string) context.Context {
 	h.scopeMu.Lock()
@@ -146,13 +145,13 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 	t.Cleanup(func() { _ = binding.Close(context.Background()); _ = second.Close(context.Background()) })
 
 	var ledgerRows, ledgerTables int
-	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 7 {
+	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _schema_migrations`).Scan(&ledgerRows); err != nil || ledgerRows != 18 {
 		t.Fatalf("shared host migration ledger rows=%d err=%v", ledgerRows, err)
 	}
 	if err := host.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%schema_migrations%'`).Scan(&ledgerTables); err != nil || ledgerTables != 1 {
 		t.Fatalf("migration ledger tables=%d err=%v", ledgerTables, err)
 	}
-	if host.registrar.calls != 2 {
+	if host.registrar.calls != 4 {
 		t.Fatalf("host migration registrar calls=%d", host.registrar.calls)
 	}
 
