@@ -64,6 +64,11 @@ func (*Factory) OpenModule(ctx context.Context, application dataexchange.Applica
 type artifactMigrationRegistrar struct{ target modulehost.MigrationRegistrar }
 
 func (r artifactMigrationRegistrar) ApplyOwnedMigrations(ctx context.Context, owner string, migrations []sharedartifact.SchemaMigration) error {
+	if target, ok := r.target.(interface {
+		ApplyFoundationArtifactMigrations(context.Context, string, []sharedartifact.SchemaMigration) error
+	}); ok {
+		return target.ApplyFoundationArtifactMigrations(ctx, owner, migrations)
+	}
 	items := make([]modulehost.Migration, 0)
 	for _, migration := range migrations {
 		for index, statement := range migration.Statements {
