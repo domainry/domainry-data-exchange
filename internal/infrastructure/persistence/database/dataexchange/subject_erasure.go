@@ -11,7 +11,6 @@ import (
 
 	sdk "github.com/domainry/domainry-data-exchange-sdk"
 	sharedartifact "github.com/domainry/domainry-foundation/artifact"
-	lifecyclemodel "github.com/domainry/domainry-lifecycle-sdk/model"
 	"github.com/domainry/domainry-orm/query"
 )
 
@@ -66,6 +65,15 @@ type subjectStepQueryer interface {
 type subjectStepExecutor interface {
 	subjectStepQueryer
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type persistedSubjectStep struct {
+	WorkspaceID string          `json:"workspace_id"`
+	RequestID   string          `json:"request_id"`
+	Owner       string          `json:"owner"`
+	Operation   string          `json:"operation"`
+	Payload     json.RawMessage `json:"payload"`
+	CompletedAt int64           `json:"completed_at"`
 }
 
 func (s *Store) checkSubjectSubmission(ctx context.Context, tx *sql.Tx, scope sdk.Scope) error {
@@ -127,7 +135,7 @@ func (s *Store) sharedSubjectStep(ctx context.Context, executor subjectStepQuery
 	} else if err != nil {
 		return nil, false, err
 	}
-	var step lifecyclemodel.SubjectExecutionStep
+	var step persistedSubjectStep
 	if json.Unmarshal([]byte(raw), &step) != nil || step.WorkspaceID != workspace || step.RequestID != request || step.Owner != dataExchangeSubjectOwner || step.Operation != operation || !json.Valid(step.Payload) {
 		return nil, false, fmt.Errorf("Data Exchange shared subject execution step invalid")
 	}
@@ -147,13 +155,13 @@ func (s *Store) saveSharedSubjectStep(ctx context.Context, executor subjectStepE
 		return nil
 	}
 	completedAt := time.Now().UTC()
-	step := lifecyclemodel.SubjectExecutionStep{
+	step := persistedSubjectStep{
 		WorkspaceID: workspace,
 		RequestID:   request,
 		Owner:       dataExchangeSubjectOwner,
 		Operation:   operation,
 		Payload:     append(json.RawMessage(nil), payload...),
-		CompletedAt: completedAt,
+		CompletedAt: completedAt.UnixMilli(),
 	}
 	raw, err := json.Marshal(step)
 	if err != nil {
@@ -161,7 +169,7 @@ func (s *Store) saveSharedSubjectStep(ctx context.Context, executor subjectStepE
 	}
 	insert := query.NewWorkspaceInsertBuilder(s.renderer, sharedSubjectExecutionStepsTable, workspace).
 		Columns("request_id", "owner", "operation", "payload_json", "completed_at").
-		Values(request, dataExchangeSubjectOwner, operation, string(raw), completedAt.Format(time.RFC3339Nano))
+		Values(request, dataExchangeSubjectOwner, operation, string(raw), completedAt.UnixMilli())
 	_, err = execute(ctx, executor, insert)
 	return err
 }
@@ -255,7 +263,7 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 			}
 		}
 		cancel := query.NewWorkspaceUpdateBuilder(s.renderer, "_data_exchange_jobs", request.WorkspaceID).
-			Set("status", "cancelled").Set("error_code", "subject_erasure_pending").Set("next_attempt_at", "").
+			Set("status", "cancelled").Set("error_code", "subject_erasure_pending").Set("next_attempt_at", int64(0)).
 			SetExpression("fencing_token", query.Add(query.Column("fencing_token"), query.Value(1))).
 			Where(query.And(query.Equal("id", job.ID), query.Equal("actor_id", request.SubjectID), query.Equal("status", "queued")))
 		if _, err = execute(ctx, tx, cancel); err != nil {
@@ -336,7 +344,7 @@ func (s *Store) ErasePreparedSubject(ctx context.Context, request sdk.SubjectEra
 			Set("source_sha256", "").Set("source_bytes", 0).Set("source_chunks", 0).Set("result_chunks", 0).
 			Set("checkpoint_value", 0).Set("checkpoint_cursor", "").Set("total_value", 0).
 			Set("artifact_id", "").Set("reference_id", "").Set("role_key", "").
-			Set("lease_owner", "").Set("lease_expires_at", "").Set("next_attempt_at", "").
+			Set("lease_owner", "").Set("lease_expires_at", int64(0)).Set("next_attempt_at", int64(0)).
 			SetExpression("fencing_token", query.Add(query.Column("fencing_token"), query.Value(1))).
 			Where(query.And(query.Equal("id", job.ID), query.Equal("actor_id", request.SubjectID), query.NotEqual("status", "running")))
 		res, err := execute(ctx, tx, redact)

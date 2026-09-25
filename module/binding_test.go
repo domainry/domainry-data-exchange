@@ -518,6 +518,8 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("missing-grant get status=%d body=%s", response.Code, response.Body.String())
 	}
 
+	// This factory-path test uses the currently published Foundation artifact
+	// dependency; its transport fixture remains on that dependency's contract.
 	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +594,7 @@ func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, provider.content[:chunkSize], strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(t.Context(), "worker-two", time.Second)
@@ -635,7 +637,7 @@ func TestExpiredLeaseRejectsChangedCanonicalArtifactPrefix(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, append([]byte(nil), provider.content[:chunkSize]...), strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	provider.content = append([]byte(nil), provider.content...)
@@ -719,7 +721,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 
 	t.Run("expired", func(t *testing.T) {
 		binding, db, scope, jobID := completeExport(t)
-		if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), jobID); err != nil {
+		if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), jobID); err != nil {
 			t.Fatal(err)
 		}
 		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
@@ -779,7 +781,7 @@ func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
 	if err = store.CommitResultPage(context.Background(), claimed, 0, first, "next", 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err = db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(context.Background(), "worker-two", time.Second)

@@ -22,15 +22,15 @@ func newTestArtifactStore(t *testing.T, db *sql.DB) *testArtifactStore {
 workspace_id TEXT NOT NULL, id TEXT PRIMARY KEY, owner TEXT NOT NULL, kind TEXT NOT NULL,
 idempotency_key TEXT NOT NULL, created_by TEXT NOT NULL, owner_org_id TEXT NOT NULL DEFAULT '', filename TEXT NOT NULL,
 media_type TEXT NOT NULL, content_sha256 TEXT NOT NULL, size_bytes BIGINT NOT NULL,
-storage_reference TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL DEFAULT '',
+storage_reference TEXT NOT NULL, status TEXT NOT NULL, expires_at BIGINT,
 scan_status TEXT NOT NULL, download_token_sha256 TEXT NOT NULL DEFAULT '',
 authorization_scope_sha256 TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL,
-created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
 UNIQUE(workspace_id, owner, kind, idempotency_key))`,
 		`CREATE TABLE IF NOT EXISTS _artifact_bindings (
 workspace_id TEXT NOT NULL, id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, owner TEXT NOT NULL,
 kind TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
-field_key TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL, created_at TEXT NOT NULL,
+field_key TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL, created_at BIGINT NOT NULL,
 UNIQUE(workspace_id, artifact_id, owner, kind, resource_type, resource_id, field_key))`,
 	} {
 		if _, err := db.ExecContext(t.Context(), statement); err != nil {
@@ -51,9 +51,9 @@ storage_reference,status,expires_at,scan_status,download_token_sha256,authorizat
 metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		value.WorkspaceID, value.ID, value.Owner, value.Kind, value.IdempotencyKey, value.CreatedBy,
 		value.Filename, value.MediaType, value.ContentSHA256, value.SizeBytes, value.StorageReference,
-		string(value.Status), formatArtifactTestTime(value.ExpiresAt), string(value.ScanStatus),
+		string(value.Status), artifactTestMillis(value.ExpiresAt), string(value.ScanStatus),
 		value.DownloadTokenSHA256, value.AuthorizationScopeSHA256, string(value.Metadata),
-		value.CreatedAt.UTC().Format(time.RFC3339Nano), value.UpdatedAt.UTC().Format(time.RFC3339Nano))
+		value.CreatedAt.UTC().UnixMilli(), value.UpdatedAt.UTC().UnixMilli())
 	if err == nil {
 		return value, true, nil
 	}
@@ -89,7 +89,7 @@ func (s *testArtifactStore) find(ctx context.Context, predicate string, argument
 }
 
 func (s *testArtifactStore) Transition(ctx context.Context, workspace, id string, expected, next sharedartifact.Status, scan sharedartifact.ScanStatus, at time.Time) (bool, error) {
-	result, err := s.executor(ctx).ExecContext(ctx, `UPDATE _artifacts SET status=?,scan_status=?,updated_at=? WHERE workspace_id=? AND id=? AND status=?`, string(next), string(scan), at.UTC().Format(time.RFC3339Nano), workspace, id, string(expected))
+	result, err := s.executor(ctx).ExecContext(ctx, `UPDATE _artifacts SET status=?,scan_status=?,updated_at=? WHERE workspace_id=? AND id=? AND status=?`, string(next), string(scan), at.UTC().UnixMilli(), workspace, id, string(expected))
 	if err != nil {
 		return false, err
 	}
@@ -98,7 +98,7 @@ func (s *testArtifactStore) Transition(ctx context.Context, workspace, id string
 }
 
 func (s *testArtifactStore) Bind(ctx context.Context, value sharedartifact.Binding) (sharedartifact.Binding, bool, error) {
-	_, err := s.executor(ctx).ExecContext(ctx, `INSERT INTO _artifact_bindings (workspace_id,id,artifact_id,owner,kind,resource_type,resource_id,field_key,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, value.WorkspaceID, value.ID, value.ArtifactID, value.Owner, value.Kind, value.ResourceType, value.ResourceID, value.FieldKey, string(value.Metadata), value.CreatedAt.UTC().Format(time.RFC3339Nano))
+	_, err := s.executor(ctx).ExecContext(ctx, `INSERT INTO _artifact_bindings (workspace_id,id,artifact_id,owner,kind,resource_type,resource_id,field_key,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, value.WorkspaceID, value.ID, value.ArtifactID, value.Owner, value.Kind, value.ResourceType, value.ResourceID, value.FieldKey, string(value.Metadata), value.CreatedAt.UTC().UnixMilli())
 	if err == nil {
 		return value, true, nil
 	}
@@ -123,15 +123,13 @@ func (s *testArtifactStore) Bindings(ctx context.Context, workspace, artifactID 
 	values := []sharedartifact.Binding{}
 	for rows.Next() {
 		var value sharedartifact.Binding
-		var metadata, createdAt string
+		var metadata string
+		var createdAt int64
 		if err = rows.Scan(&value.WorkspaceID, &value.ID, &value.ArtifactID, &value.Owner, &value.Kind, &value.ResourceType, &value.ResourceID, &value.FieldKey, &metadata, &createdAt); err != nil {
 			return nil, err
 		}
 		value.Metadata = json.RawMessage(metadata)
-		value.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
-		if err != nil {
-			return nil, err
-		}
+		value.CreatedAt = time.UnixMilli(createdAt).UTC()
 		values = append(values, value)
 	}
 	return values, rows.Err()
@@ -141,29 +139,27 @@ type artifactTestScanner interface{ Scan(...any) error }
 
 func scanTestArtifact(row artifactTestScanner) (sharedartifact.Artifact, error) {
 	var value sharedartifact.Artifact
-	var status, scanStatus, expiresAt, metadata, createdAt, updatedAt string
+	var status, scanStatus, metadata string
+	var expiresAt sql.NullInt64
+	var createdAt, updatedAt int64
 	err := row.Scan(&value.WorkspaceID, &value.ID, &value.Owner, &value.Kind, &value.IdempotencyKey, &value.CreatedBy, &value.Filename, &value.MediaType, &value.ContentSHA256, &value.SizeBytes, &value.StorageReference, &status, &expiresAt, &scanStatus, &value.DownloadTokenSHA256, &value.AuthorizationScopeSHA256, &metadata, &createdAt, &updatedAt)
 	if err != nil {
 		return value, err
 	}
 	value.Status, value.ScanStatus, value.Metadata = sharedartifact.Status(status), sharedartifact.ScanStatus(scanStatus), json.RawMessage(metadata)
-	if expiresAt != "" {
-		value.ExpiresAt, err = time.Parse(time.RFC3339Nano, expiresAt)
+	if expiresAt.Valid {
+		value.ExpiresAt = time.UnixMilli(expiresAt.Int64).UTC()
 	}
-	if err == nil {
-		value.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
-	}
-	if err == nil {
-		value.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
-	}
+	value.CreatedAt = time.UnixMilli(createdAt).UTC()
+	value.UpdatedAt = time.UnixMilli(updatedAt).UTC()
 	return value, err
 }
 
-func formatArtifactTestTime(value time.Time) string {
+func artifactTestMillis(value time.Time) any {
 	if value.IsZero() {
-		return ""
+		return nil
 	}
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().UnixMilli()
 }
 
 var _ sharedartifact.Store = (*testArtifactStore)(nil)

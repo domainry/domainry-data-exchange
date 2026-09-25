@@ -138,7 +138,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 			digest := sha256.Sum256(part)
 			insert := query.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
 				Columns("workspace_id", "job_id", "direction", "sequence_no", "content", "content_sha256", "created_at").
-				Values(r.Scope.WorkspaceID, stagingID, "source", chunks, part, hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano))
+				Values(r.Scope.WorkspaceID, stagingID, "source", chunks, part, hex.EncodeToString(digest[:]), time.Now().UTC().UnixMilli())
 			if _, err = execute(ctx, tx, insert); err != nil {
 				return dataexchange.Job{}, false, err
 			}
@@ -184,7 +184,7 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	now := time.Now().UTC()
 	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "source_sha256", "source_bytes", "source_chunks", "actor_id", "role_key", "created_at", "updated_at").
-		Values(id, r.Scope.WorkspaceID, r.Provider, "import", r.ObjectKey, r.IdempotencyKey, requestHash, payload, "queued", sourceHash, total, chunks, r.Scope.ActorID, r.Scope.RoleKey, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		Values(id, r.Scope.WorkspaceID, r.Provider, "import", r.ObjectKey, r.IdempotencyKey, requestHash, payload, "queued", sourceHash, total, chunks, r.Scope.ActorID, r.Scope.RoleKey, now.UnixMilli(), now.UnixMilli())
 	if _, err = execute(ctx, tx, insertJob); err != nil {
 		_ = tx.Rollback()
 		if existing, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey); ok {
@@ -240,7 +240,7 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 	}
 	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
 		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "actor_id", "role_key", "reference_id", "created_at", "updated_at").
-		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.UnixMilli(), now.UnixMilli())
 	_, err := execute(ctx, tx, insertJob)
 	if err != nil {
 		_ = tx.Rollback()
@@ -268,7 +268,7 @@ var jobColumns = []string{"id", "provider", "operation", "status", "checkpoint_v
 
 func scanJob(row scanner) (dataexchange.Job, error) {
 	var j dataexchange.Job
-	var created, updated string
+	var created, updated int64
 	var options []byte
 	err := row.Scan(&j.ID, &j.Provider, &j.Operation, &j.Status, &j.Checkpoint, &j.Cursor, &j.Total, &j.ResultChunks, &j.ArtifactID, &j.ErrorCode, &created, &updated, &j.WorkspaceID, &j.ObjectKey, &j.ActorID, &j.RoleKey, &j.ReferenceID, &options)
 	if err != nil {
@@ -281,8 +281,8 @@ func scanJob(row scanner) (dataexchange.Job, error) {
 			j.Options = append([]byte(nil), payload.Options...)
 		}
 	}
-	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	j.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	j.CreatedAt = time.UnixMilli(created).UTC()
+	j.UpdatedAt = time.UnixMilli(updated).UTC()
 	return j, nil
 }
 func (s *Store) lookupIdempotent(ctx context.Context, scope dataexchange.Scope, provider, operation, objectKey, key string) (dataexchange.Job, bool) {
@@ -378,7 +378,7 @@ func (s *Store) Cancel(ctx context.Context, r dataexchange.JobRequest, access da
 	}
 	if selected.Status == "queued" || selected.Status == "running" {
 		update := query.NewWorkspaceUpdateBuilder(s.renderer, "_data_exchange_jobs", access.WorkspaceID).
-			Set("status", "cancelled").Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).
+			Set("status", "cancelled").Set("updated_at", time.Now().UTC().UnixMilli()).
 			Where(query.And(jobCandidatePredicate(r, access, ""), query.In("status", "queued", "running")))
 		result, updateErr := execute(ctx, tx, update)
 		if updateErr != nil {
@@ -471,14 +471,14 @@ func (s *Store) ClaimJob(ctx context.Context, request dataexchange.JobRequest, o
 
 func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl time.Duration, request *dataexchange.JobRequest) (dataexchangemodel.WorkItem, bool, error) {
 	var x dataexchangemodel.WorkItem
-	var created, updated string
+	var created, updated int64
 	now := time.Now().UTC()
 	readyQueued := query.And(query.Equal("status", "queued"), query.Or(
-		query.Equal("next_attempt_at", ""), query.LessThan("next_attempt_at", now.Format(time.RFC3339Nano)),
+		query.Equal("next_attempt_at", int64(0)), query.LessThan("next_attempt_at", now.UnixMilli()),
 	))
 	claimable := query.Or(
 		readyQueued,
-		query.And(query.Equal("status", "running"), query.NotEqual("lease_expires_at", ""), query.LessThan("lease_expires_at", now.Format(time.RFC3339Nano))),
+		query.And(query.Equal("status", "running"), query.NotEqual("lease_expires_at", int64(0)), query.LessThan("lease_expires_at", now.UnixMilli())),
 	)
 	candidate := []query.Predicate{query.Equal("workspace_id", workspace), claimable}
 	if request != nil {
@@ -507,16 +507,16 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	if err != nil {
 		return x, false, err
 	}
-	x.Job.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	x.Job.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	x.Job.CreatedAt = time.UnixMilli(created).UTC()
+	x.Job.UpdatedAt = time.UnixMilli(updated).UTC()
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
-		Set("status", "running").Set("lease_owner", owner).Set("lease_expires_at", now.Add(ttl).Format(time.RFC3339Nano)).
-		Set("next_attempt_at", "").
+		Set("status", "running").Set("lease_owner", owner).Set("lease_expires_at", now.Add(ttl).UnixMilli()).
+		Set("next_attempt_at", int64(0)).
 		SetExpression("fencing_token", query.Add(query.Column("fencing_token"), query.Value(1))).
-		Set("updated_at", now.Format(time.RFC3339Nano)).
+		Set("updated_at", now.UnixMilli()).
 		Where(query.And(query.Equal("id", x.Job.ID), claimCandidate))
 	res, err := execute(ctx, s.db, update)
 	if err != nil {
@@ -593,13 +593,13 @@ func (s *Store) CommitResultPage(ctx context.Context, x dataexchangemodel.WorkIt
 	defer tx.Rollback()
 	insert := query.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
 		Columns("workspace_id", "job_id", "direction", "sequence_no", "content", "content_sha256", "created_at").
-		Values(x.Scope.WorkspaceID, x.Job.ID, "result", seq, content, hex.EncodeToString(d[:]), time.Now().UTC().Format(time.RFC3339Nano))
+		Values(x.Scope.WorkspaceID, x.Job.ID, "result", seq, content, hex.EncodeToString(d[:]), time.Now().UTC().UnixMilli())
 	if _, err = execute(ctx, tx, insert); err != nil {
 		return err
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").
 		Set("checkpoint_value", checkpoint).Set("checkpoint_cursor", nextCursor).Set("total_value", total).Set("result_chunks", seq+1).
-		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
+		Set("updated_at", time.Now().UTC().UnixMilli()).Where(fencedJob(x))
 	result, err := execute(ctx, tx, update)
 	if err != nil {
 		return err
@@ -612,7 +612,7 @@ func (s *Store) CommitResultPage(ctx context.Context, x dataexchangemodel.WorkIt
 }
 func (s *Store) Progress(ctx context.Context, x dataexchangemodel.WorkItem, checkpoint, total int) error {
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("checkpoint_value", checkpoint).Set("total_value", total).
-		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
+		Set("updated_at", time.Now().UTC().UnixMilli()).Where(fencedJob(x))
 	result, e := execute(ctx, s.db, update)
 	if e != nil {
 		return e
@@ -657,8 +657,8 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 		aid = persisted.ID
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
-		Set("error_code", "").Set("next_attempt_at", "").Set("lease_owner", "").Set("lease_expires_at", "").
-		Set("updated_at", time.Now().UTC().Format(time.RFC3339Nano)).Where(fencedJob(x))
+		Set("error_code", "").Set("next_attempt_at", int64(0)).Set("lease_owner", "").Set("lease_expires_at", int64(0)).
+		Set("updated_at", time.Now().UTC().UnixMilli()).Where(fencedJob(x))
 	result, e := execute(ctx, tx, update)
 	if e != nil {
 		return e
@@ -693,13 +693,13 @@ func dataExchangeArtifact(x dataexchangemodel.WorkItem, value dataexchangemodel.
 }
 func (s *Store) Fail(ctx context.Context, x dataexchangemodel.WorkItem, plan dataexchangemodel.FailurePlan) error {
 	now := time.Now().UTC()
-	next := ""
+	next := int64(0)
 	if !plan.NextAttemptAt.IsZero() {
-		next = plan.NextAttemptAt.UTC().Format(time.RFC3339Nano)
+		next = plan.NextAttemptAt.UTC().UnixMilli()
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", plan.Status).Set("error_code", plan.Code).
-		Set("attempt_count", plan.Attempts).Set("next_attempt_at", next).Set("lease_owner", "").Set("lease_expires_at", "").
-		Set("updated_at", now.Format(time.RFC3339Nano)).Where(fencedJob(x))
+		Set("attempt_count", plan.Attempts).Set("next_attempt_at", next).Set("lease_owner", "").Set("lease_expires_at", int64(0)).
+		Set("updated_at", now.UnixMilli()).Where(fencedJob(x))
 	result, err := execute(ctx, s.db, update)
 	if err != nil {
 		return err
@@ -716,8 +716,8 @@ func (s *Store) Heartbeat(ctx context.Context, x dataexchangemodel.WorkItem, ttl
 		ttl = 30 * time.Second
 	}
 	now := time.Now().UTC()
-	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("lease_expires_at", now.Add(ttl).Format(time.RFC3339Nano)).
-		Set("updated_at", now.Format(time.RFC3339Nano)).Where(fencedJob(x))
+	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("lease_expires_at", now.Add(ttl).UnixMilli()).
+		Set("updated_at", now.UnixMilli()).Where(fencedJob(x))
 	result, err := execute(ctx, s.db, update)
 	if err != nil {
 		return err

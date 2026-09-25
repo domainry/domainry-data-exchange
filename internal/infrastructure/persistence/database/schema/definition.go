@@ -57,15 +57,15 @@ func jobsTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
 		required("artifact_id", ormschema.TextKey(191)).DefaultValue(""),
 		required("error_code", ormschema.TextKey(191)).DefaultValue(""),
 		required("lease_owner", ormschema.TextKey(191)).DefaultValue(""),
-		required("lease_expires_at", ormschema.TextKey(40)).DefaultValue(""),
+		required("lease_expires_at", ormschema.BigInt()).DefaultValue(0),
 		required("fencing_token", ormschema.BigInt()).DefaultValue(0),
 		required("actor_id", ormschema.TextKey(191)),
 		required("role_key", ormschema.TextKey(191)).DefaultValue(""),
-		required("created_at", ormschema.TextKey(40)),
-		required("updated_at", ormschema.TextKey(40)),
+		required("created_at", ormschema.BigInt()),
+		required("updated_at", ormschema.BigInt()),
 		required("reference_id", ormschema.TextKey(191)).DefaultValue(""),
 		required("attempt_count", ormschema.Integer()).DefaultValue(0),
-		required("next_attempt_at", ormschema.TextKey(40)).DefaultValue(""),
+		required("next_attempt_at", ormschema.BigInt()).DefaultValue(0),
 	).PrimaryKey("id")
 }
 
@@ -77,7 +77,7 @@ func jobChunksTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
 		required("sequence_no", ormschema.Integer()),
 		required("content", ormschema.LongText()),
 		required("content_sha256", ormschema.TextKey(64)),
-		required("created_at", ormschema.TextKey(40)),
+		required("created_at", ormschema.BigInt()),
 	).PrimaryKey("workspace_id", "job_id", "direction", "sequence_no")
 }
 
