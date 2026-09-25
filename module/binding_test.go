@@ -518,9 +518,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("missing-grant get status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	// This factory-path test uses the currently published Foundation artifact
-	// dependency; its transport fixture remains on that dependency's contract.
-	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
