@@ -18,7 +18,7 @@ func bindSharedSubjectLifecycle(t *testing.T, binding interface{ BindSubjectLife
 	t.Helper()
 	for _, statement := range []string{
 		`CREATE TABLE _subject_requests (id TEXT NOT NULL, workspace_id TEXT NOT NULL, request_type TEXT NOT NULL, kind TEXT NOT NULL, resolved_identity TEXT NOT NULL, PRIMARY KEY(workspace_id,id))`,
-		`CREATE TABLE _subject_steps (workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, owner TEXT NOT NULL, operation TEXT NOT NULL, payload_json TEXT NOT NULL, completed_at TEXT NOT NULL, PRIMARY KEY(workspace_id,request_id,owner,operation))`,
+		`CREATE TABLE _subject_steps (workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, owner TEXT NOT NULL, operation TEXT NOT NULL, payload_json TEXT NOT NULL, completed_at BIGINT NOT NULL, PRIMARY KEY(workspace_id,request_id,owner,operation))`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -34,7 +34,7 @@ func beginSharedSubjectErasure(t *testing.T, db *sql.DB, workspace, subject, req
 	if _, err := db.Exec(`INSERT INTO _subject_requests(id,workspace_id,request_type,kind,resolved_identity) VALUES(?,?,'subject_request','erase',?)`, request, workspace, subject); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO _subject_steps(workspace_id,request_id,owner,operation,payload_json,completed_at) VALUES(?,?,'lifecycle','erase_fence','{}',?)`, workspace, request, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := db.Exec(`INSERT INTO _subject_steps(workspace_id,request_id,owner,operation,payload_json,completed_at) VALUES(?,?,'lifecycle','erase_fence','{}',?)`, workspace, request, time.Now().UTC().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 }
