@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/domainry/domainry-data-exchange-sdk v0.3.12
-	github.com/domainry/domainry-foundation v0.1.44
+	github.com/domainry/domainry-foundation v0.2.0
 	github.com/domainry/domainry-identity-sdk v0.1.22
 	github.com/domainry/domainry-orm v0.1.33
 	modernc.org/sqlite v1.57.0
@@ -22,6 +22,8 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.1 // indirect
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

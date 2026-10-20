@@ -17,6 +17,7 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	workerplatform "github.com/domainry/domainry-foundation/worker"
 	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
 	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
@@ -155,27 +156,25 @@ func (b *Service) Start(parent context.Context, c dataexchange.WorkerConfig) <-c
 	if c.BatchSize <= 0 {
 		c.BatchSize = 1
 	}
-	go func() {
-		defer close(done)
-		owner := b.application.RuntimeID + ":" + b.application.ApplicationID
-		t := time.NewTicker(c.PollInterval)
-		defer t.Stop()
-		for {
-			for claimed := 0; claimed < c.BatchSize; claimed++ {
-				x, ok, e := b.store.Claim(ctx, owner, c.LeaseTTL)
-				if e != nil || !ok {
-					break
-				}
-				_ = b.processClaimed(ctx, x, c.LeaseTTL)
+	owner := b.application.RuntimeID + ":" + b.application.ApplicationID
+	return workerplatform.StartAdaptiveLoop(ctx, workerplatform.Identity{Owner: "data_exchange", Name: "job_processor"}, c.PollInterval, max(30*time.Second, c.PollInterval*30), func(tickCtx context.Context) (workerplatform.TickResult, error) {
+		result := workerplatform.TickResult{}
+		var tickErr error
+		for claimed := 0; claimed < c.BatchSize; claimed++ {
+			x, ok, err := b.store.Claim(tickCtx, owner, c.LeaseTTL)
+			if err != nil {
+				tickErr = errors.Join(tickErr, err)
+				break
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
+			if !ok {
+				break
 			}
+			result.Worked = true
+			result.ProcessedCount++
+			tickErr = errors.Join(tickErr, b.processClaimed(tickCtx, x, c.LeaseTTL))
 		}
-	}()
-	return done
+		return result, tickErr
+	})
 }
 
 func (b *Service) processClaimed(ctx context.Context, x dataexchangemodel.WorkItem, leaseTTL time.Duration) error {
@@ -185,6 +184,7 @@ func (b *Service) processClaimed(ctx context.Context, x dataexchangemodel.WorkIt
 		if failErr := b.store.Fail(failCtx, x, plan); failErr != nil {
 			return errors.Join(err, failErr)
 		}
+		return err
 	}
 	return nil
 }
