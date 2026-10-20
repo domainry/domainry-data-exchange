@@ -11,7 +11,7 @@ does not import implementation packages or maintain a second file engine.
 ## Deployments
 
 - `module.Factory` runs in-process and owns `_data_exchange_jobs` and `_data_exchange_job_chunks`; output metadata and job bindings use the host's shared Artifact store, and workspace discovery uses shared Worker Scopes.
-- `remote.Factory` delegates the same SDK Binding to a SaaS transport. The transport must connect the Runtime Provider bridge before accepting work.
+- `module.NewSaaSFactory` delegates the same SDK Binding to a SaaS transport. The transport must connect the Runtime Provider bridge before accepting work.
 
 Both deployments expose the same `dataexchange.Binding`. Runtime composition selects a Factory; HTTP and Record application code do not branch on deployment mode.
 
@@ -84,7 +84,7 @@ module while preserving the existing Data Exchange deployment contract:
   durable worker lifecycle.
 - `internal/adapter/dataexchangesdk` is the SDK-facing binding adapter.
 - `internal/assembly/module` and `internal/assembly/saas` compose the two
-  deployments. Public `module` and `remote` packages are compatibility facades.
+  deployments. Public `module` is the only implementation facade.
 - `internal/infrastructure/persistence/database/{dataexchange,schema}` owns DML
   and migration definitions; concrete dialect profiles remain under
   `sqlite`, `mysql`, and `postgres`.

@@ -11,7 +11,7 @@ import (
 
 func TestRequiredDeploymentPackagesExist(t *testing.T) {
 	for _, path := range []string{
-		"../../module", "../../remote",
+		"../../module",
 		"../application/dataexchange", "../domain/dataexchange/model", "../domain/dataexchange/repository", "../domain/dataexchange/service",
 		"../assembly/module", "../assembly/saas", "../adapter/dataexchangesdk",
 		"../transport/http/module", "../transport/http/saas",
@@ -20,6 +20,35 @@ func TestRequiredDeploymentPackagesExist(t *testing.T) {
 	} {
 		if info, err := os.Stat(path); err != nil || !info.IsDir() {
 			t.Fatalf("required package %s is missing", path)
+		}
+	}
+}
+
+func TestRepositoryAndAssemblyExposeOnlyCanonicalEntrypoints(t *testing.T) {
+	rootEntries, err := os.ReadDir(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootAllowed := map[string]bool{"docs": true, "internal": true, "module": true}
+	for _, entry := range rootEntries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if !rootAllowed[entry.Name()] {
+			t.Errorf("unreviewed Data Exchange root directory %q", entry.Name())
+		}
+	}
+	assemblyEntries, err := os.ReadDir(filepath.Join("..", "assembly"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assemblyAllowed := map[string]bool{"module": true, "saas": true}
+	for _, entry := range assemblyEntries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if !entry.IsDir() || !assemblyAllowed[entry.Name()] {
+			t.Errorf("internal/assembly contains non-deployment entry %q", entry.Name())
 		}
 	}
 }
@@ -66,8 +95,8 @@ func TestModuleUsesTaggedDependencies(t *testing.T) {
 	}
 }
 
-func TestPublicFacadesStayThinAndPersistenceStaysInternal(t *testing.T) {
-	for _, path := range []string{"../../module", "../../remote"} {
+func TestPublicFacadeStaysThinAndPersistenceStaysInternal(t *testing.T) {
+	for _, path := range []string{"../../module"} {
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			t.Fatal(err)

@@ -4,7 +4,9 @@ package module
 
 import (
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
+	"github.com/domainry/domainry-data-exchange-sdk/saashost"
 	moduleassembly "github.com/domainry/domainry-data-exchange/internal/assembly/module"
+	saasassembly "github.com/domainry/domainry-data-exchange/internal/assembly/saas"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	persistenceschema "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence/database/schema"
 	"github.com/domainry/domainry-foundation/schemaownership"
@@ -12,8 +14,13 @@ import (
 
 type Options = moduleassembly.Options
 type Factory = moduleassembly.Factory
+type SaaSFactory = saasassembly.Factory
 
 var NewFactory = moduleassembly.NewFactory
+
+func NewSaaSFactory(transport saashost.Transport) SaaSFactory {
+	return saasassembly.NewFactory(transport)
+}
 
 // SchemaOwnership returns only Data Exchange-owned physical tables. Shared
 // Foundation tables are registered by their source-owning packages.
