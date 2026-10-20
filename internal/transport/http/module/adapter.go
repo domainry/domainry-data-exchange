@@ -19,6 +19,7 @@ import (
 	actioncontract "github.com/domainry/domainry-foundation/action"
 	"github.com/domainry/domainry-foundation/apperror"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	"github.com/domainry/domainry-foundation/telemetry"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
 
@@ -338,10 +339,12 @@ func projectJob(job dataexchange.Job) jobResponse {
 
 func writeError(response http.ResponseWriter, err error) {
 	if errors.Is(err, dataexchange.ErrArtifactExpired) {
+		telemetry.RecordHTTPStatusError(response, http.StatusConflict, "backend.data_exchange.artifact_expired")
 		writeJSON(response, http.StatusConflict, map[string]string{"code": "backend.data_exchange.artifact_expired"})
 		return
 	}
 	if errors.Is(err, dataexchange.ErrJobNotFound) {
+		telemetry.RecordHTTPStatusError(response, http.StatusNotFound, "backend.data_exchange.job_not_found")
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "backend.data_exchange.job_not_found"})
 		return
 	}
@@ -364,6 +367,7 @@ func writeError(response http.ResponseWriter, err error) {
 	if code == "" || status == http.StatusInternalServerError {
 		code = "backend.data_exchange.internal"
 	}
+	telemetry.RecordHTTPStatusError(response, status, code)
 	writeJSON(response, status, map[string]string{"code": code})
 }
 
