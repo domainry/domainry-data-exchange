@@ -2,7 +2,6 @@ package module
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +17,8 @@ import (
 	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
 	actioncontract "github.com/domainry/domainry-foundation/action"
 	"github.com/domainry/domainry-foundation/apperror"
+	"github.com/domainry/domainry-foundation/httpresponse"
 	"github.com/domainry/domainry-foundation/modulehttp"
-	"github.com/domainry/domainry-foundation/telemetry"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
 
@@ -91,14 +90,14 @@ func NewAdapter(binding jobBinding, host modulehost.Host) (modulehttp.Adapter, e
 func (s *adapter) listJobs(response http.ResponseWriter, request *http.Request) {
 	principal, ok := identitysdk.PrincipalFromContext(request.Context())
 	if !ok {
-		writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "backend.authentication_required"})
+		httpresponse.WriteError(response, request, httpresponse.Failure{Status: http.StatusUnauthorized, Code: "backend.authentication_required"})
 		return
 	}
 	limit := 0
 	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_list_request"})
+			httpresponse.WriteError(response, request, httpresponse.Failure{Status: http.StatusBadRequest, Code: "backend.data_exchange.invalid_job_list_request", Cause: err})
 			return
 		}
 		limit = parsed
@@ -108,7 +107,7 @@ func (s *adapter) listJobs(response http.ResponseWriter, request *http.Request) 
 		Provider: strings.TrimSpace(request.URL.Query().Get("provider")), Operation: strings.TrimSpace(request.URL.Query().Get("operation")), Status: strings.TrimSpace(request.URL.Query().Get("status")), Limit: limit,
 	}
 	if err := listRequest.Validate(); err != nil {
-		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_list_request"})
+		httpresponse.WriteError(response, request, httpresponse.Failure{Status: http.StatusBadRequest, Code: "backend.data_exchange.invalid_job_list_request", Cause: err})
 		return
 	}
 	binding, supported := s.binding.(jobListBinding)
@@ -294,7 +293,7 @@ func (s *adapter) projectJob(request *http.Request, job dataexchange.Job, scope 
 func httpJobRequest(response http.ResponseWriter, request *http.Request, permissionKey string) (dataexchange.JobRequest, bool) {
 	principal, ok := identitysdk.PrincipalFromContext(request.Context())
 	if !ok {
-		writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "backend.authentication_required"})
+		httpresponse.WriteError(response, request, httpresponse.Failure{Status: http.StatusUnauthorized, Code: "backend.authentication_required"})
 		return dataexchange.JobRequest{}, false
 	}
 	jobRequest := dataexchange.JobRequest{
@@ -304,7 +303,7 @@ func httpJobRequest(response http.ResponseWriter, request *http.Request, permiss
 		JobID: strings.TrimSpace(request.PathValue("jobID")), Provider: strings.TrimSpace(request.URL.Query().Get("provider")), Operation: strings.TrimSpace(request.URL.Query().Get("operation")),
 	}
 	if err := jobRequest.Validate(); err != nil {
-		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "backend.data_exchange.invalid_job_request"})
+		httpresponse.WriteError(response, request, httpresponse.Failure{Status: http.StatusBadRequest, Code: "backend.data_exchange.invalid_job_request", Cause: err})
 		return dataexchange.JobRequest{}, false
 	}
 	if _, err := dataexchangeservice.ResolveJobAccess(request.Context(), jobRequest, permissionKey); err != nil {
@@ -339,13 +338,11 @@ func projectJob(job dataexchange.Job) jobResponse {
 
 func writeError(response http.ResponseWriter, err error) {
 	if errors.Is(err, dataexchange.ErrArtifactExpired) {
-		telemetry.RecordHTTPStatusError(response, http.StatusConflict, "backend.data_exchange.artifact_expired", err)
-		writeJSON(response, http.StatusConflict, map[string]string{"code": "backend.data_exchange.artifact_expired"})
+		httpresponse.WriteError(response, nil, httpresponse.Failure{Status: http.StatusConflict, Code: "backend.data_exchange.artifact_expired", Cause: err})
 		return
 	}
 	if errors.Is(err, dataexchange.ErrJobNotFound) {
-		telemetry.RecordHTTPStatusError(response, http.StatusNotFound, "backend.data_exchange.job_not_found", err)
-		writeJSON(response, http.StatusNotFound, map[string]string{"code": "backend.data_exchange.job_not_found"})
+		httpresponse.WriteError(response, nil, httpresponse.Failure{Status: http.StatusNotFound, Code: "backend.data_exchange.job_not_found", Cause: err})
 		return
 	}
 	status := http.StatusInternalServerError
@@ -367,15 +364,12 @@ func writeError(response http.ResponseWriter, err error) {
 	if code == "" || status == http.StatusInternalServerError {
 		code = "backend.data_exchange.internal"
 	}
-	telemetry.RecordHTTPStatusError(response, status, code, err)
-	writeJSON(response, status, map[string]string{"code": code})
+	httpresponse.WriteError(response, nil, httpresponse.Failure{Status: status, Code: code, Params: apperror.ParamsOf(err), Cause: err})
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
-	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
-	response.WriteHeader(status)
-	_ = json.NewEncoder(response).Encode(value)
+	httpresponse.WriteJSON(response, status, value)
 }
 
 var _ modulehttp.Adapter = (*adapter)(nil)
