@@ -30,7 +30,7 @@ func (*remoteTestTransport) Descriptor(context.Context, dataexchange.Application
 }
 func (t *remoteTestTransport) SubmitImport(_ context.Context, _ dataexchange.ApplicationRef, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	t.source = r.Source
-	return dataexchange.Job{ID: "remote-job", Status: "queued"}, false, nil
+	return dataexchange.Job{JobID: "remote-job", Status: "queued"}, false, nil
 }
 func (*remoteTestTransport) SubmitExport(context.Context, dataexchange.ApplicationRef, dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
 	return dataexchange.Job{}, false, nil
@@ -58,7 +58,7 @@ func TestSaaSBindingConnectsProviderBridgeAndPassesSourceStream(t *testing.T) {
 	}
 	source := strings.NewReader("id\n1\n")
 	job, _, err := binding.SubmitImport(t.Context(), dataexchange.ImportRequest{Source: source})
-	if err != nil || job.ID != "remote-job" {
+	if err != nil || job.JobID != "remote-job" {
 		t.Fatalf("job=%+v err=%v", job, err)
 	}
 	if transport.source != source {

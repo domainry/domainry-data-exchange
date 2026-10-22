@@ -66,7 +66,7 @@ func probeJob(request dataexchange.JobRequest) dataexchange.Job {
 		provider = "records"
 	}
 	return dataexchange.Job{
-		ID: request.JobID, Provider: provider, Operation: "export", Status: status, ObjectKey: "contact",
+		JobID: request.JobID, Provider: provider, Operation: "export", Status: status, ObjectKey: "contact",
 		WorkspaceID: request.Scope.WorkspaceID, ActorID: request.Scope.ActorID, Options: []byte("secret"), LeaseOwner: "worker-secret",
 		CreatedAt: now, UpdatedAt: now,
 	}

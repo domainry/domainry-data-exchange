@@ -17,9 +17,12 @@ type WorkItem struct {
 }
 
 type ArtifactRecord struct {
-	ID, Filename, ContentType, SHA256 string
-	Size                              int64
-	ExpiresAt                         time.Time
+	ArtifactID  string
+	Filename    string
+	ContentType string
+	SHA256      string
+	Size        int64
+	ExpiresAt   time.Time
 }
 
 // JobAccess is the storage-facing projection of one exact Permission grant.

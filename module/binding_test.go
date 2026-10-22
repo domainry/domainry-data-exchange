@@ -310,7 +310,7 @@ func TestModuleStreamsImportChunksAndRunsTwoPasses(t *testing.T) {
 	}
 	done := b.Start(context.Background(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = b.Close(context.Background()); <-done })
-	completed := waitCompleted(t, b, scope, job.ID)
+	completed := waitCompleted(t, b, scope, job.JobID)
 	if completed.Status != "completed" {
 		t.Fatalf("status=%s code=%s", completed.Status, completed.ErrorCode)
 	}
@@ -352,10 +352,10 @@ func TestWorkerBatchSizeClaimsMultipleJobsPerPoll(t *testing.T) {
 	}
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Hour, BatchSize: 2})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	if completed := waitCompleted(t, binding, scope, first.ID); completed.Status != "completed" {
+	if completed := waitCompleted(t, binding, scope, first.JobID); completed.Status != "completed" {
 		t.Fatalf("first=%+v", completed)
 	}
-	if completed := waitCompleted(t, binding, scope, second.ID); completed.Status != "completed" {
+	if completed := waitCompleted(t, binding, scope, second.JobID); completed.Status != "completed" {
 		t.Fatalf("second=%+v", completed)
 	}
 }
@@ -369,14 +369,14 @@ func TestModulePagedExportProducesDownloadableArtifact(t *testing.T) {
 	}
 	done := b.Start(context.Background(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = b.Close(context.Background()); <-done })
-	completed := waitCompleted(t, b, scope, job.ID)
+	completed := waitCompleted(t, b, scope, job.JobID)
 	if completed.Status != "completed" {
 		t.Fatalf("status=%s code=%s", completed.Status, completed.ErrorCode)
 	}
 	if string(completed.Options) != "" || completed.ReferenceID != "audit-1" {
 		t.Fatalf("options=%q", completed.Options)
 	}
-	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,21 +413,21 @@ func TestModuleInlineExportMaterializesOnlyTheRequestedDurableJob(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	completed, err := inline.MaterializeExport(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: second.ID, Provider: "records", Operation: "export"})
+	completed, err := inline.MaterializeExport(t.Context(), dataexchange.JobRequest{Scope: scope, JobID: second.JobID, Provider: "records", Operation: "export"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if completed.ID != second.ID || completed.Status != "completed" || completed.ArtifactID == "" {
+	if completed.JobID != second.JobID || completed.Status != "completed" || completed.ArtifactID == "" {
 		t.Fatalf("inline job=%+v", completed)
 	}
-	queued, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: first.ID, Provider: "records", Operation: "export"})
+	queued, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: first.JobID, Provider: "records", Operation: "export"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queued.Status != "queued" || queued.ArtifactID != "" {
+	if queued.Status != "queued" || queued.ArtifactID != "" || queued.ArtifactID != first.ArtifactID {
 		t.Fatalf("unrequested job changed=%+v", queued)
 	}
-	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: second.ID, Provider: "records", Operation: "export"})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: second.JobID, Provider: "records", Operation: "export"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request := httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.JobID+"/download?provider=reports&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
 	response := httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -473,12 +473,12 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	completed := waitCompleted(t, binding, owner, job.ID)
+	completed := waitCompleted(t, binding, owner, job.JobID)
 	if completed.Status != "completed" || completed.Provider != "reports" || completed.Operation != "export" || completed.ActorID != owner.ActorID || completed.ArtifactID == "" {
 		t.Fatalf("completed Report job=%+v", completed)
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"?provider=reports&operation=export", nil)
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.JobID+"?provider=reports&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobGet))
 	response = httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -486,7 +486,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("owner get status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.JobID+"/download?provider=reports&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
 	response = httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -498,8 +498,8 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 	for _, endpoint := range []struct {
 		path, permission string
 	}{
-		{path: "/data-exchange/jobs/" + job.ID + "?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobGet},
-		{path: "/data-exchange/jobs/" + job.ID + "/download?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobDownload},
+		{path: "/data-exchange/jobs/" + job.JobID + "?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobGet},
+		{path: "/data-exchange/jobs/" + job.JobID + "/download?provider=reports&operation=export", permission: dataexchange.ActionDataExchangeJobDownload},
 	} {
 		request = httptest.NewRequest(http.MethodGet, endpoint.path, nil)
 		request = request.WithContext(jobAuthorizedContext(request.Context(), peer, endpoint.permission))
@@ -510,7 +510,7 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		}
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"?provider=reports&operation=export", nil)
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.JobID+"?provider=reports&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), owner))
 	response = httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -518,10 +518,10 @@ func TestReportExportOwnerJobHTTPAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("missing-grant get status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE artifact_id=(SELECT artifact_id FROM _data_exchange_jobs WHERE job_id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.JobID); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.ID+"/download?provider=reports&operation=export", nil)
+	request = httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+job.JobID+"/download?provider=reports&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), owner, dataexchange.ActionDataExchangeJobDownload))
 	response = httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -543,7 +543,7 @@ func TestModuleProcessesCanonicalImportArtifactWithoutCSVDecoding(t *testing.T) 
 	}
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	completed := waitCompleted(t, binding, scope, job.ID)
+	completed := waitCompleted(t, binding, scope, job.JobID)
 	if completed.Status != "completed" || provider.validated != content || provider.applied != content || provider.validatedOptions != `{"provider_readiness":{"oidc":true}}` || provider.appliedOptions != provider.validatedOptions {
 		t.Fatalf("completed=%+v validated=%q applied=%q", completed, provider.validated, provider.applied)
 	}
@@ -558,11 +558,11 @@ func TestModulePersistsCanonicalExportArtifact(t *testing.T) {
 	}
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	completed := waitCompleted(t, binding, scope, job.ID)
+	completed := waitCompleted(t, binding, scope, job.JobID)
 	if completed.Status != "completed" {
 		t.Fatalf("completed=%+v", completed)
 	}
-	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +592,7 @@ func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, provider.content[:chunkSize], strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.JobID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(t.Context(), "worker-two", time.Second)
@@ -605,7 +605,7 @@ func TestExpiredLeaseResumesCanonicalArtifactFromByteCursor(t *testing.T) {
 	if err := binding.Process(t.Context(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestExpiredLeaseRejectsChangedCanonicalArtifactPrefix(t *testing.T) {
 	if err := store.CommitResultPage(t.Context(), claimed, 0, append([]byte(nil), provider.content[:chunkSize]...), strconv.Itoa(chunkSize), 2, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
+	if _, err := db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.JobID); err != nil {
 		t.Fatal(err)
 	}
 	provider.content = append([]byte(nil), provider.content...)
@@ -659,7 +659,7 @@ func TestModuleNeverAppliesRejectedImport(t *testing.T) {
 	}
 	done := b.Start(context.Background(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = b.Close(context.Background()); <-done })
-	failed := waitCompleted(t, b, scope, job.ID)
+	failed := waitCompleted(t, b, scope, job.JobID)
 	if failed.Status != "failed" {
 		t.Fatalf("status=%s", failed.Status)
 	}
@@ -679,21 +679,21 @@ func TestJobRequestConstraintsApplyAtomicallyToQueryAndCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongOwner := dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "reports", Operation: "export"}
+	wrongOwner := dataexchange.JobRequest{Scope: scope, JobID: job.JobID, Provider: "reports", Operation: "export"}
 	if _, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-provider query error=%v; want ErrJobNotFound", err)
 	}
 	if _, err := binding.Cancel(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobCancel), wrongOwner); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-provider cancel error=%v; want ErrJobNotFound", err)
 	}
-	current, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "export"})
+	current, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.JobID, Provider: "records", Operation: "export"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if current.Status != "queued" {
 		t.Fatalf("cross-provider cancel changed status to %q", current.Status)
 	}
-	if _, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.ID, Provider: "records", Operation: "import"}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Job(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobGet), dataexchange.JobRequest{Scope: scope, JobID: job.JobID, Provider: "records", Operation: "import"}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-operation query error=%v; want ErrJobNotFound", err)
 	}
 }
@@ -711,15 +711,15 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 		}
 		done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 		t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-		if completed := waitCompleted(t, binding, scope, job.ID); completed.Status != "completed" {
+		if completed := waitCompleted(t, binding, scope, job.JobID); completed.Status != "completed" {
 			t.Fatalf("completed=%+v", completed)
 		}
-		return binding, db, scope, job.ID
+		return binding, db, scope, job.JobID
 	}
 
 	t.Run("expired", func(t *testing.T) {
 		binding, db, scope, jobID := completeExport(t)
-		if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), jobID); err != nil {
+		if _, err := db.Exec(`UPDATE _artifacts SET expires_at=? WHERE artifact_id=(SELECT artifact_id FROM _data_exchange_jobs WHERE job_id=?)`, time.Now().UTC().Add(-time.Second).UnixMilli(), jobID); err != nil {
 			t.Fatal(err)
 		}
 		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
@@ -749,7 +749,7 @@ func TestArtifactDownloadRejectsExpiredAndCorruptContent(t *testing.T) {
 
 	t.Run("artifact identity", func(t *testing.T) {
 		binding, db, scope, jobID := completeExport(t)
-		if _, err := db.Exec(`UPDATE _artifacts SET size_bytes=size_bytes+1 WHERE id=(SELECT artifact_id FROM _data_exchange_jobs WHERE id=?)`, jobID); err != nil {
+		if _, err := db.Exec(`UPDATE _artifacts SET size_bytes=size_bytes+1 WHERE artifact_id=(SELECT artifact_id FROM _data_exchange_jobs WHERE job_id=?)`, jobID); err != nil {
 			t.Fatal(err)
 		}
 		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: jobID, Provider: "records", Operation: "export"})
@@ -779,7 +779,7 @@ func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
 	if err = store.CommitResultPage(context.Background(), claimed, 0, first, "next", 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.ID); err != nil {
+	if _, err = db.Exec(`UPDATE _data_exchange_jobs SET lease_expires_at=? WHERE job_id=?`, time.Now().UTC().Add(-time.Second).UnixMilli(), job.JobID); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, ok, err := store.Claim(context.Background(), "worker-two", time.Second)
@@ -795,7 +795,7 @@ func TestExpiredLeaseResumesExportFromAtomicCursor(t *testing.T) {
 	if err = b.Process(context.Background(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := b.Download(jobAuthorizedContext(context.Background(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,8 +821,8 @@ func TestImportIdempotencyVerifiesStreamFingerprint(t *testing.T) {
 		t.Fatalf("first: replay=%v err=%v", replay, err)
 	}
 	second, replay, err := b.SubmitImport(context.Background(), request("id,name\n1,one\n"))
-	if err != nil || !replay || second.ID != first.ID {
-		t.Fatalf("replay: job=%q replay=%v err=%v", second.ID, replay, err)
+	if err != nil || !replay || second.JobID != first.JobID {
+		t.Fatalf("replay: job=%q replay=%v err=%v", second.JobID, replay, err)
 	}
 	if _, _, err = b.SubmitImport(context.Background(), request("id,name\n1,different\n")); !errors.Is(err, dataexchange.ErrIdempotencyKeyReused) || !strings.Contains(err.Error(), "different source") {
 		t.Fatalf("different source error=%v", err)
@@ -838,7 +838,7 @@ func TestExportIdempotencyRejectsChangedOwnerReference(t *testing.T) {
 		t.Fatalf("first submit job=%+v replayed=%v err=%v", first, replayed, err)
 	}
 	replayedJob, replayedOK, err := b.SubmitExport(t.Context(), request)
-	if err != nil || !replayedOK || replayedJob.ID != first.ID {
+	if err != nil || !replayedOK || replayedJob.JobID != first.JobID {
 		t.Fatalf("same request replay job=%+v replayed=%v err=%v", replayedJob, replayedOK, err)
 	}
 	request.ReferenceID = "audit-two"
@@ -865,7 +865,7 @@ func TestIdempotencyScopeDoesNotConflictAcrossWorkspaceObjectOrKey(t *testing.T)
 		}
 		for _, request := range variants {
 			job, replayed, err := binding.SubmitExport(t.Context(), request)
-			if err != nil || replayed || job.ID == first.ID {
+			if err != nil || replayed || job.JobID == first.JobID {
 				t.Fatalf("request=%+v job=%+v replayed=%v err=%v", request, job, replayed, err)
 			}
 		}
@@ -891,7 +891,7 @@ func TestIdempotencyScopeDoesNotConflictAcrossWorkspaceObjectOrKey(t *testing.T)
 		}
 		for _, variant := range variants {
 			job, replayed, err := binding.SubmitImport(t.Context(), variant)
-			if err != nil || replayed || job.ID == first.ID {
+			if err != nil || replayed || job.JobID == first.JobID {
 				t.Fatalf("request=%+v job=%+v replayed=%v err=%v", variant, job, replayed, err)
 			}
 		}
@@ -917,14 +917,14 @@ func TestModuleJobOwnerScopeKeepsActorAndWorkspaceIsolation(t *testing.T) {
 
 	managerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "manager"}
 	managerCtx := jobAuthorizedContext(t.Context(), managerScope, dataexchange.ActionDataExchangeJobGet)
-	if _, err := binding.Job(managerCtx, dataexchange.JobRequest{Scope: managerScope, JobID: peer.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Job(managerCtx, dataexchange.JobRequest{Scope: managerScope, JobID: peer.JobID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("peer read error=%v", err)
 	}
 	bobCtx := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobGet)
-	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID}); err != nil {
+	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: peer.JobID}); err != nil {
 		t.Fatalf("owner read: %v", err)
 	}
-	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: foreign.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Job(bobCtx, dataexchange.JobRequest{Scope: peerScope, JobID: foreign.JobID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-workspace read error=%v", err)
 	}
 }
@@ -941,20 +941,20 @@ func TestModuleCancelRequiresExactPermissionAndOwnerScope(t *testing.T) {
 
 	managerScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "manager"}
 	managerCancel := jobAuthorizedContext(t.Context(), managerScope, dataexchange.ActionDataExchangeJobCancel)
-	if _, err := binding.Cancel(managerCancel, dataexchange.JobRequest{Scope: managerScope, JobID: peer.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Cancel(managerCancel, dataexchange.JobRequest{Scope: managerScope, JobID: peer.JobID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("peer cancel error=%v", err)
 	}
 
 	bobRead := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobGet)
-	current, err := binding.Job(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID})
+	current, err := binding.Job(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.JobID})
 	if err != nil || current.Status != "queued" {
 		t.Fatalf("queued candidate: job=%+v err=%v", current, err)
 	}
-	if _, err := binding.Cancel(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
+	if _, err := binding.Cancel(bobRead, dataexchange.JobRequest{Scope: peerScope, JobID: peer.JobID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
 		t.Fatalf("different exact Permission cancelled job: %v", err)
 	}
 	bobCancel := jobAuthorizedContext(t.Context(), peerScope, dataexchange.ActionDataExchangeJobCancel)
-	cancelled, err := binding.Cancel(bobCancel, dataexchange.JobRequest{Scope: peerScope, JobID: peer.ID})
+	cancelled, err := binding.Cancel(bobCancel, dataexchange.JobRequest{Scope: peerScope, JobID: peer.JobID})
 	if err != nil || cancelled.Status != "cancelled" {
 		t.Fatalf("cancel=%+v err=%v", cancelled, err)
 	}
@@ -971,21 +971,21 @@ func TestModuleArtifactDownloadRequiresExactPermissionAndWorkspace(t *testing.T)
 	}
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	if completed := waitCompleted(t, binding, bobScope, job.ID); completed.Status != "completed" {
+	if completed := waitCompleted(t, binding, bobScope, job.JobID); completed.Status != "completed" {
 		t.Fatalf("completed=%+v", completed)
 	}
 
 	aliceScope := dataexchange.Scope{WorkspaceID: "workspace", ActorID: "alice"}
 	wrongExact := jobAuthorizedContext(t.Context(), aliceScope, dataexchange.ActionDataExchangeJobGet)
-	if _, err := binding.Download(wrongExact, dataexchange.JobRequest{Scope: aliceScope, JobID: job.ID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
+	if _, err := binding.Download(wrongExact, dataexchange.JobRequest{Scope: aliceScope, JobID: job.JobID}); err == nil || !strings.Contains(err.Error(), "job_permission_denied") {
 		t.Fatalf("different exact Permission downloaded artifact: %v", err)
 	}
 	aliceDownload := jobAuthorizedContext(t.Context(), aliceScope, dataexchange.ActionDataExchangeJobDownload)
-	if _, err := binding.Download(aliceDownload, dataexchange.JobRequest{Scope: aliceScope, JobID: job.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Download(aliceDownload, dataexchange.JobRequest{Scope: aliceScope, JobID: job.JobID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("peer download error=%v", err)
 	}
 	bobDownload := jobAuthorizedContext(t.Context(), bobScope, dataexchange.ActionDataExchangeJobDownload)
-	artifact, err := binding.Download(bobDownload, dataexchange.JobRequest{Scope: bobScope, JobID: job.ID})
+	artifact, err := binding.Download(bobDownload, dataexchange.JobRequest{Scope: bobScope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,7 +995,7 @@ func TestModuleArtifactDownloadRequiresExactPermissionAndWorkspace(t *testing.T)
 	}
 	foreignScope := dataexchange.Scope{WorkspaceID: "workspace-other", ActorID: "bob"}
 	foreignCtx := jobAuthorizedContext(t.Context(), foreignScope, dataexchange.ActionDataExchangeJobDownload)
-	if _, err := binding.Download(foreignCtx, dataexchange.JobRequest{Scope: foreignScope, JobID: job.ID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
+	if _, err := binding.Download(foreignCtx, dataexchange.JobRequest{Scope: foreignScope, JobID: job.JobID}); !errors.Is(err, dataexchange.ErrJobNotFound) {
 		t.Fatalf("cross-workspace download error=%v", err)
 	}
 }

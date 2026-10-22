@@ -19,6 +19,7 @@ import (
 	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	persistenceengine "github.com/domainry/domainry-data-exchange/internal/infrastructure/persistence"
 	sharedartifact "github.com/domainry/domainry-foundation/artifact"
+	"github.com/domainry/domainry-foundation/entityid"
 	sharedworkerscope "github.com/domainry/domainry-foundation/workerscope"
 	ormdialect "github.com/domainry/domainry-orm/dialect"
 	"github.com/domainry/domainry-orm/query"
@@ -66,10 +67,7 @@ func (s *Store) BindSubjectLifecyclePersistence() {
 func (s *Store) SubjectLifecyclePersistenceBound() bool {
 	return s != nil && s.subjectLifecycle.Load()
 }
-func jobID(scope dataexchange.Scope, provider, operation, objectKey, key string) string {
-	d := sha256.Sum256([]byte(scope.WorkspaceID + "\x00" + scope.ActorID + "\x00" + provider + "\x00" + operation + "\x00" + objectKey + "\x00" + key))
-	return "data_exchange:" + hex.EncodeToString(d[:12])
-}
+func newJobID() (string, error) { return entityid.New("dexjob") }
 func fingerprint(parts ...[]byte) string {
 	h := sha256.New()
 	for _, p := range parts {
@@ -108,7 +106,10 @@ type importRequestPayload struct {
 
 func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) (dataexchange.Job, bool, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	id := jobID(r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey)
+	id, err := newJobID()
+	if err != nil {
+		return dataexchange.Job{}, false, err
+	}
 	stagingID := fmt.Sprintf("%s:staging:%d", id, time.Now().UTC().UnixNano())
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -183,12 +184,12 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	}
 	now := time.Now().UTC()
 	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
-		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "source_sha256", "source_bytes", "source_chunks", "actor_id", "role_key", "created_at", "updated_at").
+		Columns("job_id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "source_sha256", "source_bytes", "source_chunks", "actor_id", "role_key", "created_at", "updated_at").
 		Values(id, r.Scope.WorkspaceID, r.Provider, "import", r.ObjectKey, r.IdempotencyKey, requestHash, payload, "queued", sourceHash, total, chunks, r.Scope.ActorID, r.Scope.RoleKey, now.UnixMilli(), now.UnixMilli())
 	if _, err = execute(ctx, tx, insertJob); err != nil {
 		_ = tx.Rollback()
 		if existing, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey); ok {
-			hash, hashErr := s.requestHash(ctx, existing.ID)
+			hash, hashErr := s.requestHash(ctx, existing.JobID)
 			if hashErr == nil && hash == requestHash {
 				return existing, true, nil
 			}
@@ -208,12 +209,16 @@ func (s *Store) SubmitImport(ctx context.Context, r dataexchange.ImportRequest) 
 	if err = tx.Commit(); err != nil {
 		return dataexchange.Job{}, false, err
 	}
-	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "import", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, Options: append([]byte(nil), r.Options...), CreatedAt: now, UpdatedAt: now}, false, nil
+	created, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "import", r.ObjectKey, r.IdempotencyKey)
+	if !ok {
+		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange inserted import job disappeared")
+	}
+	return created, false, nil
 }
 
 func (s *Store) requestHash(ctx context.Context, id string) (string, error) {
 	var value string
-	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(query.Equal("id", id)).Build()
+	queryValue, args, err := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").Columns("request_sha256").Where(query.Equal("job_id", id)).Build()
 	if err != nil {
 		return "", err
 	}
@@ -223,7 +228,10 @@ func (s *Store) requestHash(ctx context.Context, id string) (string, error) {
 
 func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
 	ctx = s.Scoped(ctx, r.Scope.WorkspaceID, r.Scope.ActorID)
-	id := jobID(r.Scope, r.Provider, "export", r.ObjectKey, r.IdempotencyKey)
+	id, idErr := newJobID()
+	if idErr != nil {
+		return dataexchange.Job{}, false, idErr
+	}
 	payload := r.Options
 	if payload == nil {
 		payload = []byte{}
@@ -239,13 +247,13 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 		return dataexchange.Job{}, false, err
 	}
 	insertJob := query.NewInsertBuilder(s.renderer, "_data_exchange_jobs").
-		Columns("id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "actor_id", "role_key", "reference_id", "created_at", "updated_at").
-		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.UnixMilli(), now.UnixMilli())
+		Columns("job_id", "workspace_id", "provider", "operation", "object_key", "idempotency_key", "request_sha256", "request_payload", "status", "artifact_id", "actor_id", "role_key", "reference_id", "created_at", "updated_at").
+		Values(id, r.Scope.WorkspaceID, r.Provider, "export", r.ObjectKey, r.IdempotencyKey, hash, payload, "queued", "", r.Scope.ActorID, r.Scope.RoleKey, strings.TrimSpace(r.ReferenceID), now.UnixMilli(), now.UnixMilli())
 	_, err := execute(ctx, tx, insertJob)
 	if err != nil {
 		_ = tx.Rollback()
 		if j, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "export", r.ObjectKey, r.IdempotencyKey); ok {
-			existing, _ := s.requestHash(ctx, j.ID)
+			existing, _ := s.requestHash(ctx, j.JobID)
 			if existing != hash {
 				return dataexchange.Job{}, false, fmt.Errorf("%w with a different request", dataexchange.ErrIdempotencyKeyReused)
 			}
@@ -259,18 +267,22 @@ func (s *Store) SubmitExport(ctx context.Context, r dataexchange.ExportRequest) 
 	if err = tx.Commit(); err != nil {
 		return dataexchange.Job{}, false, err
 	}
-	return dataexchange.Job{ID: id, Provider: r.Provider, Operation: "export", Status: "queued", WorkspaceID: r.Scope.WorkspaceID, ObjectKey: r.ObjectKey, ActorID: r.Scope.ActorID, RoleKey: r.Scope.RoleKey, ReferenceID: strings.TrimSpace(r.ReferenceID), Options: append([]byte(nil), payload...), CreatedAt: now, UpdatedAt: now}, false, nil
+	created, ok := s.lookupIdempotent(ctx, r.Scope, r.Provider, "export", r.ObjectKey, r.IdempotencyKey)
+	if !ok {
+		return dataexchange.Job{}, false, fmt.Errorf("Data Exchange inserted export job disappeared")
+	}
+	return created, false, nil
 }
 
 type scanner interface{ Scan(...any) error }
 
-var jobColumns = []string{"id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "object_key", "actor_id", "role_key", "reference_id", "request_payload"}
+var jobColumns = []string{"id", "job_id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "object_key", "actor_id", "role_key", "reference_id", "request_payload"}
 
 func scanJob(row scanner) (dataexchange.Job, error) {
 	var j dataexchange.Job
 	var created, updated int64
 	var options []byte
-	err := row.Scan(&j.ID, &j.Provider, &j.Operation, &j.Status, &j.Checkpoint, &j.Cursor, &j.Total, &j.ResultChunks, &j.ArtifactID, &j.ErrorCode, &created, &updated, &j.WorkspaceID, &j.ObjectKey, &j.ActorID, &j.RoleKey, &j.ReferenceID, &options)
+	err := row.Scan(&j.ID, &j.JobID, &j.Provider, &j.Operation, &j.Status, &j.Checkpoint, &j.Cursor, &j.Total, &j.ResultChunks, &j.ArtifactID, &j.ErrorCode, &created, &updated, &j.WorkspaceID, &j.ObjectKey, &j.ActorID, &j.RoleKey, &j.ReferenceID, &options)
 	if err != nil {
 		return j, err
 	}
@@ -420,7 +432,7 @@ func (s *Store) jobSelect(r dataexchange.JobRequest, access dataexchangemodel.Jo
 
 func jobCandidatePredicate(r dataexchange.JobRequest, access dataexchangemodel.JobAccess, alias string) query.Predicate {
 	predicates := []query.Predicate{
-		columnEqual(alias, "id", strings.TrimSpace(r.JobID)),
+		columnEqual(alias, "job_id", strings.TrimSpace(r.JobID)),
 		columnEqual(alias, "actor_id", access.OwnerActorID),
 	}
 	if provider := strings.TrimSpace(r.Provider); provider != "" {
@@ -483,7 +495,7 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	candidate := []query.Predicate{query.Equal("workspace_id", workspace), claimable}
 	if request != nil {
 		candidate = append(candidate,
-			query.Equal("id", strings.TrimSpace(request.JobID)),
+			query.Equal("job_id", strings.TrimSpace(request.JobID)),
 			query.Equal("actor_id", strings.TrimSpace(request.Scope.ActorID)),
 		)
 		if provider := strings.TrimSpace(request.Provider); provider != "" {
@@ -495,12 +507,12 @@ func (s *Store) claimWorkspace(ctx context.Context, workspace, owner string, ttl
 	}
 	claimCandidate := query.And(candidate...)
 	queryValue, args, buildErr := query.NewSelectBuilder(s.renderer, "_data_exchange_jobs").
-		Columns("id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "fencing_token", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "actor_id", "role_key", "reference_id", "object_key", "request_payload", "attempt_count").
+		Columns("id", "job_id", "provider", "operation", "status", "checkpoint_value", "checkpoint_cursor", "total_value", "result_chunks", "fencing_token", "artifact_id", "error_code", "created_at", "updated_at", "workspace_id", "actor_id", "role_key", "reference_id", "object_key", "request_payload", "attempt_count").
 		Where(claimCandidate).OrderBy(query.Ascending("created_at")).Limit(1).Build()
 	if buildErr != nil {
 		return x, false, buildErr
 	}
-	err := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&x.Job.ID, &x.Job.Provider, &x.Job.Operation, &x.Job.Status, &x.Job.Checkpoint, &x.Job.Cursor, &x.Job.Total, &x.Job.ResultChunks, &x.Job.FencingToken, &x.Job.ArtifactID, &x.Job.ErrorCode, &created, &updated, &x.Scope.WorkspaceID, &x.Scope.ActorID, &x.Scope.RoleKey, &x.Job.ReferenceID, &x.ObjectKey, &x.Payload, &x.Attempts)
+	err := s.db.QueryRowContext(ctx, queryValue, args...).Scan(&x.Job.ID, &x.Job.JobID, &x.Job.Provider, &x.Job.Operation, &x.Job.Status, &x.Job.Checkpoint, &x.Job.Cursor, &x.Job.Total, &x.Job.ResultChunks, &x.Job.FencingToken, &x.Job.ArtifactID, &x.Job.ErrorCode, &created, &updated, &x.Scope.WorkspaceID, &x.Scope.ActorID, &x.Scope.RoleKey, &x.Job.ReferenceID, &x.ObjectKey, &x.Payload, &x.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return x, false, nil
 	}
@@ -593,7 +605,7 @@ func (s *Store) CommitResultPage(ctx context.Context, x dataexchangemodel.WorkIt
 	defer tx.Rollback()
 	insert := query.NewInsertBuilder(s.renderer, "_data_exchange_job_chunks").
 		Columns("workspace_id", "job_id", "direction", "sequence_no", "content", "content_sha256", "created_at").
-		Values(x.Scope.WorkspaceID, x.Job.ID, "result", seq, content, hex.EncodeToString(d[:]), time.Now().UTC().UnixMilli())
+		Values(x.Scope.WorkspaceID, x.Job.JobID, "result", seq, content, hex.EncodeToString(d[:]), time.Now().UTC().UnixMilli())
 	if _, err = execute(ctx, tx, insert); err != nil {
 		return err
 	}
@@ -606,7 +618,7 @@ func (s *Store) CommitResultPage(ctx context.Context, x dataexchangemodel.WorkIt
 	}
 	updated, _ := result.RowsAffected()
 	if updated != 1 {
-		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.ID)
+		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.JobID)
 	}
 	return tx.Commit()
 }
@@ -619,7 +631,7 @@ func (s *Store) Progress(ctx context.Context, x dataexchangemodel.WorkItem, chec
 	}
 	updated, _ := result.RowsAffected()
 	if updated != 1 {
-		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.ID)
+		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.JobID)
 	}
 	return nil
 }
@@ -647,14 +659,14 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 		if registerErr != nil {
 			return registerErr
 		}
-		if persisted.ID != metadata.ID || persisted.Owner != sharedartifact.OwnerDataExchange || persisted.Kind != "output" {
+		if persisted.ArtifactID != metadata.ArtifactID || persisted.Owner != sharedartifact.OwnerDataExchange || persisted.Kind != "output" {
 			return fmt.Errorf("Data Exchange shared artifact identity conflict")
 		}
-		binding.ArtifactID = persisted.ID
+		binding.ArtifactID = persisted.ArtifactID
 		if _, _, e = s.artifacts.Bind(sharedContext, binding); e != nil {
 			return e
 		}
-		aid = persisted.ID
+		aid = persisted.ArtifactID
 	}
 	update := query.NewUpdateBuilder(s.renderer, "_data_exchange_jobs").Set("status", "completed").Set("artifact_id", aid).
 		Set("error_code", "").Set("next_attempt_at", int64(0)).Set("lease_owner", "").Set("lease_expires_at", int64(0)).
@@ -665,31 +677,30 @@ func (s *Store) Complete(ctx context.Context, x dataexchangemodel.WorkItem, a *d
 	}
 	updated, _ := result.RowsAffected()
 	if updated != 1 {
-		return fmt.Errorf("Data Exchange job %s is no longer running", x.Job.ID)
+		return fmt.Errorf("Data Exchange job %s is no longer running", x.Job.JobID)
 	}
 	return tx.Commit()
 }
 
 func dataExchangeArtifact(x dataexchangemodel.WorkItem, value dataexchangemodel.ArtifactRecord, now time.Time) (sharedartifact.Artifact, sharedartifact.Binding, error) {
 	metadata, err := json.Marshal(map[string]string{
-		"job_id": x.Job.ID, "provider": x.Job.Provider, "operation": x.Job.Operation, "object_key": x.ObjectKey,
+		"job_id": x.Job.JobID, "provider": x.Job.Provider, "operation": x.Job.Operation, "object_key": x.ObjectKey,
 	})
 	if err != nil {
 		return sharedartifact.Artifact{}, sharedartifact.Binding{}, err
 	}
-	bindingID := "data-exchange-job-artifact:" + fingerprint([]byte(x.Scope.WorkspaceID), []byte(x.Job.ID), []byte(value.ID))
 	return sharedartifact.Artifact{
-			ID: value.ID, WorkspaceID: x.Scope.WorkspaceID, Owner: sharedartifact.OwnerDataExchange, Kind: "output",
-			IdempotencyKey: "job:" + x.Job.ID + ":output", CreatedBy: "data-exchange-worker",
-			Filename: value.Filename, MediaType: value.ContentType, ContentSHA256: value.SHA256, SizeBytes: value.Size,
-			StorageReference: "data-exchange-job-chunks:" + x.Scope.WorkspaceID + ":" + x.Job.ID + ":result",
-			Status:           sharedartifact.StatusAvailable, ExpiresAt: value.ExpiresAt, ScanStatus: sharedartifact.ScanNotRequired,
-			Metadata: metadata, CreatedAt: now, UpdatedAt: now,
-		}, sharedartifact.Binding{
-			ID: bindingID, WorkspaceID: x.Scope.WorkspaceID, Owner: sharedartifact.OwnerDataExchange,
-			Kind: sharedartifact.BindingJob, ResourceType: "data_exchange_job", ResourceID: x.Job.ID,
-			Metadata: json.RawMessage(`{}`), CreatedAt: now,
-		}, nil
+		ArtifactID: value.ArtifactID, WorkspaceID: x.Scope.WorkspaceID, Owner: sharedartifact.OwnerDataExchange, Kind: "output",
+		IdempotencyKey: "job:" + x.Job.JobID + ":output", CreatedBy: "data-exchange-worker",
+		Filename: value.Filename, MediaType: value.ContentType, ContentSHA256: value.SHA256, SizeBytes: value.Size,
+		StorageReference: "data-exchange-job-chunks:" + x.Scope.WorkspaceID + ":" + x.Job.JobID + ":result",
+		Status:           sharedartifact.StatusAvailable, ExpiresAt: value.ExpiresAt, ScanStatus: sharedartifact.ScanNotRequired,
+		Metadata: metadata, CreatedAt: now, UpdatedAt: now,
+	}, sharedartifact.Binding{
+		WorkspaceID: x.Scope.WorkspaceID, ArtifactID: value.ArtifactID, Owner: sharedartifact.OwnerDataExchange,
+		Kind: sharedartifact.BindingJob, ResourceType: "data_exchange_job", ResourceID: x.Job.JobID,
+		Metadata: json.RawMessage(`{}`), CreatedAt: now,
+	}, nil
 }
 func (s *Store) Fail(ctx context.Context, x dataexchangemodel.WorkItem, plan dataexchangemodel.FailurePlan) error {
 	now := time.Now().UTC()
@@ -706,7 +717,7 @@ func (s *Store) Fail(ctx context.Context, x dataexchangemodel.WorkItem, plan dat
 	}
 	updated, _ := result.RowsAffected()
 	if updated != 1 {
-		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.ID)
+		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.JobID)
 	}
 	return nil
 }
@@ -724,7 +735,7 @@ func (s *Store) Heartbeat(ctx context.Context, x dataexchangemodel.WorkItem, ttl
 	}
 	updated, _ := result.RowsAffected()
 	if updated != 1 {
-		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.ID)
+		return fmt.Errorf("Data Exchange job %s fencing token is stale", x.Job.JobID)
 	}
 	return nil
 }
@@ -745,13 +756,13 @@ func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest, access 
 	if !found || stored.Owner != sharedartifact.OwnerDataExchange || stored.Kind != "output" {
 		return dataexchange.Artifact{}, dataexchange.ErrJobNotFound
 	}
-	bindings, err := s.artifacts.Bindings(ctx, access.WorkspaceID, stored.ID)
+	bindings, err := s.artifacts.Bindings(ctx, access.WorkspaceID, stored.ArtifactID)
 	if err != nil {
 		return dataexchange.Artifact{}, err
 	}
 	bound := false
 	for _, binding := range bindings {
-		if binding.Owner == sharedartifact.OwnerDataExchange && binding.Kind == sharedartifact.BindingJob && binding.ResourceType == "data_exchange_job" && binding.ResourceID == job.ID {
+		if binding.Owner == sharedartifact.OwnerDataExchange && binding.Kind == sharedartifact.BindingJob && binding.ResourceType == "data_exchange_job" && binding.ResourceID == job.JobID {
 			bound = true
 			break
 		}
@@ -759,7 +770,7 @@ func (s *Store) Artifact(ctx context.Context, r dataexchange.JobRequest, access 
 	if !bound {
 		return dataexchange.Artifact{}, fmt.Errorf("%w: shared artifact has no Data Exchange job binding", dataexchange.ErrContentCorrupt)
 	}
-	a := dataexchange.Artifact{ID: stored.ID, Filename: stored.Filename, ContentType: stored.MediaType, SHA256: stored.ContentSHA256, Size: stored.SizeBytes, ExpiresAt: stored.ExpiresAt}
+	a := dataexchange.Artifact{ID: stored.ID, ArtifactID: stored.ArtifactID, Filename: stored.Filename, ContentType: stored.MediaType, SHA256: stored.ContentSHA256, Size: stored.SizeBytes, ExpiresAt: stored.ExpiresAt}
 	if a.Size < 0 || strings.TrimSpace(a.SHA256) == "" || stored.Status == sharedartifact.StatusDeleted || stored.Status == sharedartifact.StatusRejected {
 		return dataexchange.Artifact{}, fmt.Errorf("%w: artifact metadata is invalid", dataexchange.ErrContentCorrupt)
 	}

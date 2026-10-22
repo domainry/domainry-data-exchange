@@ -168,7 +168,7 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 		t.Fatalf("submit import: replayed=%v err=%v", replayed, err)
 	}
 	replayedImport, replayed, err := binding.SubmitImport(t.Context(), importRequest())
-	if err != nil || !replayed || replayedImport.ID != importJob.ID {
+	if err != nil || !replayed || replayedImport.JobID != importJob.JobID {
 		t.Fatalf("replay import: job=%+v replayed=%v err=%v", replayedImport, replayed, err)
 	}
 	exportRequest := dataexchange.ExportRequest{
@@ -179,25 +179,25 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 		t.Fatalf("submit export: replayed=%v err=%v", replayed, err)
 	}
 	replayedExport, replayed, err := binding.SubmitExport(t.Context(), exportRequest)
-	if err != nil || !replayed || replayedExport.ID != exportJob.ID {
+	if err != nil || !replayed || replayedExport.JobID != exportJob.JobID {
 		t.Fatalf("replay export: job=%+v replayed=%v err=%v", replayedExport, replayed, err)
 	}
 
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: time.Millisecond, BatchSize: 2, LeaseTTL: time.Second})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	if completed := waitCompleted(t, binding, scope, importJob.ID); completed.Status != "completed" || completed.Checkpoint != 2 || completed.Total != 2 {
+	if completed := waitCompleted(t, binding, scope, importJob.JobID); completed.Status != "completed" || completed.Checkpoint != 2 || completed.Total != 2 {
 		t.Fatalf("import completion=%+v", completed)
 	}
-	if completed := waitCompleted(t, binding, scope, exportJob.ID); completed.Status != "completed" || completed.Checkpoint != 2 || completed.Total != 2 || completed.ResultChunks != 2 || completed.ArtifactID == "" {
+	if completed := waitCompleted(t, binding, scope, exportJob.JobID); completed.Status != "completed" || completed.Checkpoint != 2 || completed.Total != 2 || completed.ResultChunks != 2 || completed.ArtifactID == "" {
 		t.Fatalf("export completion=%+v", completed)
 	}
 
 	var jobs, sourceChunks, resultChunks, artifacts int
 	for query, destination := range map[string]*int{
 		`SELECT COUNT(*) FROM _data_exchange_jobs`: &jobs,
-		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + importJob.ID + `' AND direction='source'`:                                                                                                                                         &sourceChunks,
-		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + exportJob.ID + `' AND direction='result'`:                                                                                                                                         &resultChunks,
-		`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.id WHERE b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id='` + exportJob.ID + `'`: &artifacts,
+		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + importJob.JobID + `' AND direction='source'`:                                                                                                                                                  &sourceChunks,
+		`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id = '` + exportJob.JobID + `' AND direction='result'`:                                                                                                                                                  &resultChunks,
+		`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.artifact_id WHERE b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id='` + exportJob.JobID + `'`: &artifacts,
 	} {
 		if err := host.db.QueryRow(query).Scan(destination); err != nil {
 			t.Fatal(err)
@@ -212,7 +212,7 @@ func TestModuleBindingUsesHostDatabaseLedgerAndServesDurableWorkflow(t *testing.
 		t.Fatal("module binding did not expose exactly one HTTP adapter")
 	}
 	adapter := httpProvider.HTTPAdapters()[0]
-	request := httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+exportJob.ID+"/download?provider=records&operation=export", nil)
+	request := httptest.NewRequest(http.MethodGet, "/data-exchange/jobs/"+exportJob.JobID+"/download?provider=records&operation=export", nil)
 	request = request.WithContext(jobAuthorizedContext(request.Context(), scope, dataexchange.ActionDataExchangeJobDownload))
 	response := httptest.NewRecorder()
 	adapter.Handler().ServeHTTP(response, request)
@@ -275,7 +275,7 @@ func TestStoreTransactionsRollbackStagedContentAndTerminalWrites(t *testing.T) {
 		t.Fatalf("stale page commit error=%v", err)
 	}
 	var chunks, checkpoint, resultChunks int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id=? AND direction='result'`, job.ID).Scan(&chunks); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id=? AND direction='result'`, job.JobID).Scan(&chunks); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT checkpoint_value, result_chunks FROM _data_exchange_jobs WHERE id=?`, job.ID).Scan(&checkpoint, &resultChunks); err != nil {
@@ -285,12 +285,12 @@ func TestStoreTransactionsRollbackStagedContentAndTerminalWrites(t *testing.T) {
 		t.Fatalf("stale page transaction leaked chunks=%d checkpoint=%d result_chunks=%d", chunks, checkpoint, resultChunks)
 	}
 
-	artifact := &dataexchangemodel.ArtifactRecord{ID: job.ID + ":artifact", Filename: "result.csv", ContentType: "text/csv", SHA256: strings.Repeat("a", 64), Size: 5, ExpiresAt: time.Now().Add(time.Hour)}
+	artifact := &dataexchangemodel.ArtifactRecord{ArtifactID: job.JobID + ":artifact", Filename: "result.csv", ContentType: "text/csv", SHA256: strings.Repeat("a", 64), Size: 5, ExpiresAt: time.Now().Add(time.Hour)}
 	if err := store.Complete(t.Context(), stale, artifact); err == nil || !strings.Contains(err.Error(), "no longer running") {
 		t.Fatalf("stale completion error=%v", err)
 	}
 	var artifactRows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM _artifacts WHERE id=?`, artifact.ID).Scan(&artifactRows); err != nil || artifactRows != 0 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM _artifacts WHERE artifact_id=?`, artifact.ArtifactID).Scan(&artifactRows); err != nil || artifactRows != 0 {
 		t.Fatalf("rolled-back artifact rows=%d err=%v", artifactRows, err)
 	}
 }
@@ -341,11 +341,11 @@ func TestWorkerRecoversPartialExportWithoutDuplicatingCommittedChunks(t *testing
 	}
 	done := binding.Start(t.Context(), dataexchange.WorkerConfig{Enabled: true, PollInterval: 5 * time.Millisecond, LeaseTTL: time.Second})
 	t.Cleanup(func() { _ = binding.Close(context.Background()); <-done })
-	completed := waitCompleted(t, binding, scope, job.ID)
+	completed := waitCompleted(t, binding, scope, job.JobID)
 	if completed.Status != "completed" || completed.ErrorCode != "" || completed.ResultChunks != 2 || completed.Checkpoint != 2 {
 		t.Fatalf("recovered job=%+v", completed)
 	}
-	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, dataexchange.ActionDataExchangeJobDownload), dataexchange.JobRequest{Scope: scope, JobID: job.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestWorkerRecoversPartialExportWithoutDuplicatingCommittedChunks(t *testing
 	if err := host.db.QueryRow(`SELECT attempt_count FROM _data_exchange_jobs WHERE id=?`, job.ID).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id=? AND direction='result'`, job.ID).Scan(&chunks); err != nil {
+	if err := host.db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE job_id=? AND direction='result'`, job.JobID).Scan(&chunks); err != nil {
 		t.Fatal(err)
 	}
 	provider.mu.Lock()

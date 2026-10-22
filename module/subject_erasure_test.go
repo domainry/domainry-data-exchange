@@ -115,7 +115,7 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 		t.Fatalf("cancelled import claimed=%v err=%v", claimed, err)
 	}
 	tampered := append(json.RawMessage(nil), plan...)
-	tampered = bytes.Replace(tampered, []byte(jobs[0].ID), []byte(jobs[1].ID), 1)
+	tampered = bytes.Replace(tampered, []byte(jobs[0].JobID), []byte(jobs[1].JobID), 1)
 	if _, err = subjects.ErasePreparedSubject(system, request, tampered); err == nil {
 		t.Fatal("forged plan accepted")
 	}
@@ -127,7 +127,7 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 	if _, err = subjects.ErasePreparedSubject(system, request, plan); err == nil {
 		t.Fatal("injected source failure ignored")
 	}
-	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), owner, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: owner, JobID: jobs[0].ID})
+	artifact, err := binding.Download(jobAuthorizedContext(t.Context(), owner, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: owner, JobID: jobs[0].JobID})
 	if err != nil {
 		t.Fatalf("rollback lost artifact: %v", err)
 	}
@@ -159,10 +159,10 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 	}
 	for _, job := range []sdk.Job{jobs[0], importJob} {
 		var count int
-		if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, owner.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
+		if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, owner.WorkspaceID, job.JobID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("chunks remain=%d err=%v", count, err)
 		}
-		if err = db.QueryRow(`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.id WHERE b.workspace_id=? AND b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id=? AND a.status<>'deleted'`, owner.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
+		if err = db.QueryRow(`SELECT COUNT(*) FROM _artifacts a JOIN _artifact_bindings b ON b.workspace_id=a.workspace_id AND b.artifact_id=a.artifact_id WHERE b.workspace_id=? AND b.owner='data_exchange' AND b.kind='job' AND b.resource_type='data_exchange_job' AND b.resource_id=? AND a.status<>'deleted'`, owner.WorkspaceID, job.JobID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("active shared artifact remains=%d err=%v", count, err)
 		}
 		var payload []byte
@@ -174,11 +174,11 @@ func TestSubjectErasureDeletesDurableContentWithRollbackAndRetry(t *testing.T) {
 			t.Fatalf("job still contains personal data: %s %s %s %s", payload, key, code, status)
 		}
 	}
-	if _, err = binding.Download(jobAuthorizedContext(t.Context(), owner, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: owner, JobID: jobs[0].ID}); err == nil {
+	if _, err = binding.Download(jobAuthorizedContext(t.Context(), owner, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: owner, JobID: jobs[0].JobID}); err == nil {
 		t.Fatal("erased artifact still downloads")
 	}
 	for i, scope := range []sdk.Scope{peer, foreign} {
-		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: scope, JobID: jobs[i+1].ID})
+		artifact, err := binding.Download(jobAuthorizedContext(t.Context(), scope, sdk.ActionDataExchangeJobDownload), sdk.JobRequest{Scope: scope, JobID: jobs[i+1].JobID})
 		if err != nil {
 			t.Fatalf("other subject artifact lost: %v", err)
 		}
@@ -222,14 +222,14 @@ func TestSubjectErasureBlocksRunningJobAndFencesStaleWorker(t *testing.T) {
 	if err = store.CommitResultPage(t.Context(), x, 99, []byte("PRIVATE@example.test"), "", 1, 1); err == nil {
 		t.Fatal("stale worker recreated result chunk")
 	}
-	if err = store.Complete(t.Context(), x, &model.ArtifactRecord{ID: "stale-artifact", Filename: "PRIVATE.csv", ContentType: "text/csv", ExpiresAt: time.Now().Add(time.Hour)}); err == nil {
+	if err = store.Complete(t.Context(), x, &model.ArtifactRecord{ArtifactID: "stale-artifact", Filename: "PRIVATE.csv", ContentType: "text/csv", ExpiresAt: time.Now().Add(time.Hour)}); err == nil {
 		t.Fatal("stale worker recreated artifact")
 	}
 	if err = store.Heartbeat(t.Context(), x, time.Minute); err == nil {
 		t.Fatal("stale worker retained lease")
 	}
 	var count int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, scope.WorkspaceID, job.ID).Scan(&count); err != nil || count != 0 {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM _data_exchange_job_chunks WHERE workspace_id=? AND job_id=?`, scope.WorkspaceID, job.JobID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("stale chunk write survived: %d %v", count, err)
 	}
 	if err = db.QueryRow(`SELECT COUNT(*) FROM _artifacts WHERE workspace_id=? AND id='stale-artifact'`, scope.WorkspaceID).Scan(&count); err != nil || count != 0 {

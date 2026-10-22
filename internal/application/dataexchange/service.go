@@ -17,10 +17,11 @@ import (
 
 	dataexchange "github.com/domainry/domainry-data-exchange-sdk"
 	"github.com/domainry/domainry-data-exchange-sdk/modulehost"
-	workerplatform "github.com/domainry/domainry-foundation/worker"
 	dataexchangemodel "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/model"
 	dataexchangerepository "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/repository"
 	dataexchangeservice "github.com/domainry/domainry-data-exchange/internal/domain/dataexchange/service"
+	"github.com/domainry/domainry-foundation/entityid"
+	workerplatform "github.com/domainry/domainry-foundation/worker"
 )
 
 const importBatchRows = 500
@@ -281,13 +282,13 @@ func (b *Service) processImportArtifact(ctx context.Context, x dataexchangemodel
 		return fmt.Errorf("decode Data Exchange import artifact metadata: %w", err)
 	}
 	invoke := func(handle func(context.Context, dataexchange.ImportArtifact) (dataexchange.ImportArtifactResult, error)) (dataexchange.ImportArtifactResult, error) {
-		source, err := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
+		source, err := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.JobID, "source")
 		if err != nil {
 			return dataexchange.ImportArtifactResult{}, err
 		}
 		defer source.Close()
 		return handle(ctx, dataexchange.ImportArtifact{
-			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.ID,
+			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.JobID,
 			Filename: metadata.Filename, ContentType: metadata.ContentType, Options: append([]byte(nil), metadata.Options...), Content: source,
 		})
 	}
@@ -314,7 +315,7 @@ func (b *Service) processImportArtifact(ctx context.Context, x dataexchangemodel
 type importHandler func(context.Context, dataexchange.ImportBatch) (dataexchange.ImportBatchResult, error)
 
 func (b *Service) readImport(ctx context.Context, x dataexchangemodel.WorkItem, handle importHandler) (int, int, error) {
-	source, e := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.ID, "source")
+	source, e := b.store.Chunks(ctx, x.Scope.WorkspaceID, x.Job.JobID, "source")
 	if e != nil {
 		return 0, 0, e
 	}
@@ -330,7 +331,7 @@ func (b *Service) readImport(ctx context.Context, x dataexchangemodel.WorkItem, 
 		batchNo++
 		copyRows := append([]dataexchange.ImportRow(nil), rows...)
 		result, err := handle(ctx, dataexchange.ImportBatch{
-			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.ID, ChunkID: fmt.Sprintf("%s:%d", x.Job.ID, batchNo),
+			Scope: x.Scope, ObjectKey: x.ObjectKey, JobID: x.Job.JobID, ChunkID: fmt.Sprintf("%s:%d", x.Job.JobID, batchNo),
 			Attempt: x.Attempts + 1, Final: final, Headers: append([]string(nil), headers...), Rows: copyRows,
 		})
 		rejected += result.Rejected
@@ -378,7 +379,7 @@ func (b *Service) processExport(ctx context.Context, x dataexchangemodel.WorkIte
 	}
 	if planner, planned := p.(modulehost.ExportPlanningProvider); planned {
 		var e error
-		plan, e = planner.PlanExport(ctx, dataexchange.ExportPlanRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt})
+		plan, e = planner.PlanExport(ctx, dataexchange.ExportPlanRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, JobID: x.Job.JobID, CreatedAt: x.Job.CreatedAt})
 		if e != nil {
 			return e
 		}
@@ -395,7 +396,7 @@ func (b *Service) processExport(ctx context.Context, x dataexchangemodel.WorkIte
 	// between that commit and completion, resume finalization instead of reading
 	// the export again and duplicating every row.
 	for seq == 0 || cursor != "" {
-		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.ID, ArtifactExpiresAt: plan.ExpiresAt})
+		page, e := p.ReadExportPage(ctx, dataexchange.ExportPageRequest{Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: x.Payload, Cursor: cursor, PageSize: 500, JobID: x.Job.JobID, ArtifactExpiresAt: plan.ExpiresAt})
 		if e != nil {
 			return e
 		}
@@ -438,15 +439,19 @@ func (b *Service) processExport(ctx context.Context, x dataexchangemodel.WorkIte
 		}
 		cursor = nextCursor
 	}
-	sha, size, e := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+	sha, size, e := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.JobID)
 	if e != nil {
 		return e
 	}
-	a := &dataexchangemodel.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
+	artifactID, e := dataExchangeOutputArtifactID(x)
+	if e != nil {
+		return e
+	}
+	a := &dataexchangemodel.ArtifactRecord{ArtifactID: artifactID, Filename: plan.Filename, ContentType: plan.ContentType, SHA256: sha, Size: size, ExpiresAt: plan.ExpiresAt}
 	if finalizer, finalizes := p.(modulehost.ExportCompletionProvider); finalizes {
 		if e = finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
-			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
-			Artifact: dataexchange.Artifact{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, SHA256: a.SHA256, Size: a.Size, ExpiresAt: a.ExpiresAt},
+			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.JobID,
+			Artifact: dataexchange.Artifact{ArtifactID: a.ArtifactID, Filename: a.Filename, ContentType: a.ContentType, SHA256: a.SHA256, Size: a.Size, ExpiresAt: a.ExpiresAt},
 			Rows:     total, ResultChunks: seq,
 		}); e != nil {
 			return e
@@ -458,7 +463,7 @@ func (b *Service) processExport(ctx context.Context, x dataexchangemodel.WorkIte
 func (b *Service) processExportArtifact(ctx context.Context, x dataexchangemodel.WorkItem, provider modulehost.ExportProvider, artifactProvider modulehost.ExportArtifactProvider) error {
 	artifact, err := artifactProvider.BuildExportArtifact(ctx, dataexchange.ExportArtifactRequest{
 		Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID,
-		Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID, CreatedAt: x.Job.CreatedAt,
+		Options: append([]byte(nil), x.Payload...), JobID: x.Job.JobID, CreatedAt: x.Job.CreatedAt,
 	})
 	if err != nil {
 		return err
@@ -485,7 +490,7 @@ func (b *Service) processExportArtifact(ctx context.Context, x dataexchangemodel
 	}
 	reader := bufio.NewReader(artifact.Content)
 	if offset > 0 {
-		committedSHA, committedSize, identityErr := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+		committedSHA, committedSize, identityErr := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.JobID)
 		if identityErr != nil {
 			return identityErr
 		}
@@ -527,19 +532,27 @@ func (b *Service) processExportArtifact(ctx context.Context, x dataexchangemodel
 			}
 		}
 	}
-	sha, size, err := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.ID)
+	sha, size, err := b.store.ResultIdentity(ctx, x.Scope.WorkspaceID, x.Job.JobID)
 	if err != nil {
 		return err
 	}
-	record := &dataexchangemodel.ArtifactRecord{ID: x.Job.ID + ":artifact", Filename: artifact.Filename, ContentType: artifact.ContentType, SHA256: sha, Size: size, ExpiresAt: artifact.ExpiresAt}
+	artifactID, err := dataExchangeOutputArtifactID(x)
+	if err != nil {
+		return err
+	}
+	record := &dataexchangemodel.ArtifactRecord{ArtifactID: artifactID, Filename: artifact.Filename, ContentType: artifact.ContentType, SHA256: sha, Size: size, ExpiresAt: artifact.ExpiresAt}
 	if finalizer, finalizes := provider.(modulehost.ExportCompletionProvider); finalizes {
 		if err := finalizer.CompleteExport(ctx, dataexchange.ExportCompletion{
-			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.ID,
-			Artifact: dataexchange.Artifact{ID: record.ID, Filename: record.Filename, ContentType: record.ContentType, SHA256: record.SHA256, Size: record.Size, ExpiresAt: record.ExpiresAt},
+			Scope: x.Scope, ObjectKey: x.ObjectKey, ReferenceID: x.Job.ReferenceID, Options: append([]byte(nil), x.Payload...), JobID: x.Job.JobID,
+			Artifact: dataexchange.Artifact{ArtifactID: record.ArtifactID, Filename: record.Filename, ContentType: record.ContentType, SHA256: record.SHA256, Size: record.Size, ExpiresAt: record.ExpiresAt},
 			Rows:     artifact.Records, ResultChunks: sequence,
 		}); err != nil {
 			return err
 		}
 	}
 	return b.store.Complete(ctx, x, record)
+}
+
+func dataExchangeOutputArtifactID(x dataexchangemodel.WorkItem) (string, error) {
+	return entityid.Derive("art", "data-exchange.job-output", x.Scope.WorkspaceID, x.Job.JobID)
 }

@@ -75,7 +75,7 @@ func (t *semanticTransport) SubmitImport(_ context.Context, application dataexch
 	if t.importErr != nil {
 		return dataexchange.Job{}, false, t.importErr
 	}
-	return dataexchange.Job{ID: "remote-import", Status: "queued"}, false, nil
+	return dataexchange.Job{JobID: "remote-import", Status: "queued"}, false, nil
 }
 func (t *semanticTransport) SubmitExport(_ context.Context, application dataexchange.ApplicationRef, request dataexchange.ExportRequest) (dataexchange.Job, bool, error) {
 	t.application, t.lastExport = application, request
@@ -83,7 +83,7 @@ func (t *semanticTransport) SubmitExport(_ context.Context, application dataexch
 	if t.exportErr != nil {
 		return dataexchange.Job{}, false, t.exportErr
 	}
-	return dataexchange.Job{ID: "remote-export", Status: "queued"}, false, nil
+	return dataexchange.Job{JobID: "remote-export", Status: "queued"}, false, nil
 }
 func (t *semanticTransport) Job(_ context.Context, application dataexchange.ApplicationRef, request dataexchange.JobRequest) (dataexchange.Job, error) {
 	t.application, t.lastJobRequest = application, request
@@ -151,7 +151,7 @@ func remoteAdapter(t *testing.T, binding dataexchange.Binding) modulehttp.Adapte
 
 func TestSaaSSurfacePreservesRemoteSemanticsErrorsAndFileBoundary(t *testing.T) {
 	completed := dataexchange.Job{
-		ID: "job-1", Provider: "records", Operation: "export", Status: "completed", ObjectKey: "contact",
+		JobID: "job-1", Provider: "records", Operation: "export", Status: "completed", ObjectKey: "contact",
 		WorkspaceID: "workspace", ActorID: "actor", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	t.Run("transport download", func(t *testing.T) {
@@ -232,7 +232,7 @@ func TestSaaSBindingForwardsTransferEnvelopesWithoutBuffering(t *testing.T) {
 		Filename: "contacts.csv", ContentType: "text/csv", Options: []byte(`{"mode":"merge"}`), Source: source, MaxBytes: 1024,
 	}
 	job, replayed, err := binding.SubmitImport(t.Context(), importRequest)
-	if err != nil || replayed || job.ID != "remote-import" {
+	if err != nil || replayed || job.JobID != "remote-import" {
 		t.Fatalf("import job=%+v replayed=%v err=%v", job, replayed, err)
 	}
 	if transport.lastImport.Source != source || !reflect.DeepEqual(transport.lastImport.Scope, scope) || transport.lastImport.Provider != importRequest.Provider || transport.lastImport.ObjectKey != importRequest.ObjectKey || string(transport.lastImport.Options) != string(importRequest.Options) {
@@ -243,7 +243,7 @@ func TestSaaSBindingForwardsTransferEnvelopesWithoutBuffering(t *testing.T) {
 		Scope: scope, Provider: "records", ObjectKey: "contact", IdempotencyKey: "export-1", ReferenceID: "audit-1", Options: []byte(`{"active":true}`),
 	}
 	job, replayed, err = binding.SubmitExport(t.Context(), exportRequest)
-	if err != nil || replayed || job.ID != "remote-export" {
+	if err != nil || replayed || job.JobID != "remote-export" {
 		t.Fatalf("export job=%+v replayed=%v err=%v", job, replayed, err)
 	}
 	if !reflect.DeepEqual(transport.lastExport, exportRequest) || !reflect.DeepEqual(transport.calls, []string{"submit_import", "submit_export"}) {

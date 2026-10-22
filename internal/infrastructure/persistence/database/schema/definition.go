@@ -37,11 +37,11 @@ func SchemaMigrations(engine persistenceengine.Engine, schema string) ([]moduleh
 }
 
 func jobsTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
-	return ormschema.NewTable(renderer, JobsTableName).Columns(
-		required("id", ormschema.TextKey(191)),
-		required("workspace_id", ormschema.TextKey(191)),
-		required("provider", ormschema.TextKey(191)),
-		required("operation", ormschema.TextKey(191)),
+	return ormschema.NewTableWithRequiredColumns(renderer, JobsTableName, physicalID()).Columns(
+		required("job_id", ormschema.TextKey(191)),
+		technicalKey("workspace_id"),
+		technicalKey("provider"),
+		technicalKey("operation"),
 		required("object_key", ormschema.TextKey(191)),
 		required("idempotency_key", ormschema.TextKey(191)),
 		required("request_sha256", ormschema.TextKey(64)),
@@ -59,18 +59,18 @@ func jobsTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
 		required("lease_owner", ormschema.TextKey(191)).DefaultValue(""),
 		required("lease_expires_at", ormschema.BigInt()).DefaultValue(0),
 		required("fencing_token", ormschema.BigInt()).DefaultValue(0),
-		required("actor_id", ormschema.TextKey(191)),
+		technicalKey("actor_id"),
 		required("role_key", ormschema.TextKey(191)).DefaultValue(""),
 		required("created_at", ormschema.BigInt()),
 		required("updated_at", ormschema.BigInt()),
 		required("reference_id", ormschema.TextKey(191)).DefaultValue(""),
 		required("attempt_count", ormschema.Integer()).DefaultValue(0),
 		required("next_attempt_at", ormschema.BigInt()).DefaultValue(0),
-	).PrimaryKey("id")
+	).PrimaryKey("id").Unique("job_id").Unique("workspace_id", "provider", "operation", "object_key", "actor_id", "idempotency_key")
 }
 
 func jobChunksTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
-	return ormschema.NewTable(renderer, JobChunksTableName).Columns(
+	return ormschema.NewTableWithRequiredColumns(renderer, JobChunksTableName, physicalID()).Columns(
 		required("workspace_id", ormschema.TextKey(191)),
 		required("job_id", ormschema.TextKey(191)),
 		required("direction", ormschema.TextKey(32)),
@@ -78,20 +78,20 @@ func jobChunksTable(renderer ormschema.Renderer) *ormschema.TableBuilder {
 		required("content", ormschema.LongText()),
 		required("content_sha256", ormschema.TextKey(64)),
 		required("created_at", ormschema.BigInt()),
-	).PrimaryKey("workspace_id", "job_id", "direction", "sequence_no")
+	).PrimaryKey("id").Unique("workspace_id", "job_id", "direction", "sequence_no")
 }
 
 func SchemaOwnership() []schemaownership.Table {
 	return []schemaownership.Table{
 		{
-			Name: JobsTableName, Owner: MigrationOwner, WorkspaceScope: schemaownership.ScopeWorkspace,
-			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"id"},
+			Name: JobsTableName, Owner: MigrationOwner, Kind: schemaownership.KindEntity, WorkspaceScope: schemaownership.ScopeWorkspace,
+			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"id"}, EntityIDColumn: "job_id", EntityIDPrefix: "dexjob", BusinessKey: []string{"job_id"},
 			BoundedQueryPath: "workspace plus job identity for point reads; actor-scoped history and worker claim paths enforce limits",
 			DeletionPolicy:   "subject erasure redacts the durable job record, removes payload and personal references, and retains only non-personal execution history",
 		},
 		{
-			Name: JobChunksTableName, Owner: MigrationOwner, WorkspaceScope: schemaownership.ScopeWorkspace,
-			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"workspace_id", "job_id", "direction", "sequence_no"},
+			Name: JobChunksTableName, Owner: MigrationOwner, Kind: schemaownership.KindDependent, WorkspaceScope: schemaownership.ScopeWorkspace,
+			RetentionClass: schemaownership.RetentionUserErase, PrimaryKey: []string{"id"},
 			BoundedQueryPath: "workspace, job and direction primary-key prefix; content is streamed in sequence order instead of materialized",
 			DeletionPolicy:   "subject erasure physically deletes every source and result chunk for the subject's jobs; artifact expiry may make retained result content inaccessible",
 		},
@@ -102,4 +102,12 @@ func OwnedTables() []string { return schemaownership.Names(SchemaOwnership()) }
 
 func required(name string, kind ormschema.ColumnType) ormschema.ColumnDefinition {
 	return ormschema.Column(name, kind).NotNull()
+}
+
+func physicalID() ormschema.ColumnDefinition {
+	return ormschema.Column("id", ormschema.BigInt()).NotNull().AutoIncrement()
+}
+
+func technicalKey(name string) ormschema.ColumnDefinition {
+	return required(name, ormschema.TextKey(191)).ASCIIKey()
 }

@@ -25,7 +25,7 @@ func TestJobOwnerAccessSQLPushesWorkspaceAndActor(t *testing.T) {
 	if buildErr != nil {
 		t.Fatal(buildErr)
 	}
-	for _, fragment := range []string{`"workspace_id" = $1`, `"id" = $2`, `"actor_id" = $3`, `"provider" = $4`, `"operation" = $5`} {
+	for _, fragment := range []string{`"workspace_id" = $1`, `"job_id" = $2`, `"actor_id" = $3`, `"provider" = $4`, `"operation" = $5`} {
 		if !strings.Contains(statement, fragment) {
 			t.Fatalf("SQL %q lacks %q", statement, fragment)
 		}
@@ -59,7 +59,7 @@ func TestCancelPrecheckAndDMLRepeatWorkspaceAndActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{precheck, update} {
-		if !strings.Contains(statement, `"workspace_id"`) || !strings.Contains(statement, `"id"`) || !strings.Contains(statement, `"actor_id"`) {
+		if !strings.Contains(statement, `"workspace_id"`) || !strings.Contains(statement, `"job_id"`) || !strings.Contains(statement, `"actor_id"`) {
 			t.Fatalf("scoped cancel SQL=%s", statement)
 		}
 		where := statement[strings.Index(statement, " WHERE ")+len(" WHERE "):]

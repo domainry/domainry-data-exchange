@@ -269,7 +269,7 @@ func (s *adapter) openArtifact(request *http.Request, job dataexchange.Job, scop
 		}
 	}
 	return s.binding.Download(request.Context(), dataexchange.JobRequest{
-		Scope: scope, JobID: job.ID, Provider: job.Provider, Operation: job.Operation,
+		Scope: scope, JobID: job.JobID, Provider: job.Provider, Operation: job.Operation,
 	})
 }
 
@@ -314,7 +314,8 @@ func httpJobRequest(response http.ResponseWriter, request *http.Request, permiss
 }
 
 type jobResponse struct {
-	ID          string    `json:"id"`
+	ID          int64     `json:"id"`
+	JobID       string    `json:"job_id"`
 	Provider    string    `json:"provider"`
 	Operation   string    `json:"operation"`
 	Status      string    `json:"status"`
@@ -330,7 +331,7 @@ type jobResponse struct {
 
 func projectJob(job dataexchange.Job) jobResponse {
 	return jobResponse{
-		ID: job.ID, Provider: job.Provider, Operation: job.Operation, Status: job.Status, ObjectKey: job.ObjectKey,
+		ID: job.ID, JobID: job.JobID, Provider: job.Provider, Operation: job.Operation, Status: job.Status, ObjectKey: job.ObjectKey,
 		Checkpoint: job.Checkpoint, Total: job.Total, ArtifactID: job.ArtifactID, ErrorCode: job.ErrorCode,
 		ReferenceID: job.ReferenceID, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	}

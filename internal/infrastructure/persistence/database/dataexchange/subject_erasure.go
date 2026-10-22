@@ -25,7 +25,7 @@ const (
 )
 
 func sharedSubjectErasureRequestIDs(renderer query.Renderer, workspace, subject string) *query.SelectBuilder {
-	return query.NewWorkspaceSelectBuilder(renderer, sharedSubjectRequestsTable, workspace).Columns("id").Where(query.And(
+	return query.NewWorkspaceSelectBuilder(renderer, sharedSubjectRequestsTable, workspace).Columns("request_id").Where(query.And(
 		query.NotEqual("request_type", "external_erasure"),
 		query.Equal("kind", "erase"),
 		query.Equal("resolved_identity", subject),
@@ -46,7 +46,8 @@ func sharedSubjectFenceRequests(renderer query.Renderer, workspace, subject, req
 }
 
 type subjectJobPlan struct {
-	ID         string `json:"id"`
+	ID         int64  `json:"id"`
+	JobID      string `json:"job_id"`
 	Chunks     int    `json:"chunks"`
 	ArtifactID string `json:"artifact_id,omitempty"`
 }
@@ -96,7 +97,7 @@ func (s *Store) checkSubjectSubmission(ctx context.Context, tx *sql.Tx, scope sd
 func (s *Store) PreviewSubject(ctx context.Context, workspace, subject string) (json.RawMessage, error) {
 	ctx = s.Scoped(ctx, workspace, "subject-lifecycle")
 	statement, args, err := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_jobs", workspace).
-		Columns("id", "provider", "operation", "status").Where(query.Equal("actor_id", subject)).OrderBy(query.Ascending("id")).Build()
+		Columns("id", "job_id", "provider", "operation", "status").Where(query.Equal("actor_id", subject)).OrderBy(query.Ascending("id")).Build()
 	if err != nil {
 		return nil, err
 	}
@@ -105,13 +106,14 @@ func (s *Store) PreviewSubject(ctx context.Context, workspace, subject string) (
 		return nil, err
 	}
 	defer rows.Close()
-	items := []map[string]string{}
+	items := []map[string]any{}
 	for rows.Next() {
-		var id, provider, operation, status string
-		if err = rows.Scan(&id, &provider, &operation, &status); err != nil {
+		var id int64
+		var jobID, provider, operation, status string
+		if err = rows.Scan(&id, &jobID, &provider, &operation, &status); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]string{"id": id, "provider": provider, "operation": operation, "status": status})
+		items = append(items, map[string]any{"id": id, "job_id": jobID, "provider": provider, "operation": operation, "status": status})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
@@ -211,7 +213,7 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 		return nil, err
 	}
 	selectJobs := query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_jobs", request.WorkspaceID).
-		Columns("id", "status", "artifact_id").Where(query.Equal("actor_id", request.SubjectID)).OrderBy(query.Ascending("id"))
+		Columns("id", "job_id", "status", "artifact_id").Where(query.Equal("actor_id", request.SubjectID)).OrderBy(query.Ascending("id"))
 	if s.engine.Capabilities().RowLock {
 		selectJobs.ForUpdate()
 	}
@@ -225,8 +227,9 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 	}
 	plan := subjectErasurePlan{WorkspaceID: request.WorkspaceID, SubjectID: request.SubjectID, RequestID: request.RequestID, Jobs: []subjectJobPlan{}}
 	for rows.Next() {
-		var id, status, artifactID string
-		if err = rows.Scan(&id, &status, &artifactID); err != nil {
+		var id int64
+		var jobID, status, artifactID string
+		if err = rows.Scan(&id, &jobID, &status, &artifactID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -234,7 +237,7 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 			rows.Close()
 			return nil, fmt.Errorf("Data Exchange erasure blocked by executing job")
 		}
-		plan.Jobs = append(plan.Jobs, subjectJobPlan{ID: id, ArtifactID: artifactID})
+		plan.Jobs = append(plan.Jobs, subjectJobPlan{ID: id, JobID: jobID, ArtifactID: artifactID})
 	}
 	err = rows.Err()
 	rows.Close()
@@ -246,7 +249,7 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 	for i := range plan.Jobs {
 		job := &plan.Jobs[i]
 		statement, args, err = query.NewWorkspaceSelectBuilder(s.renderer, "_data_exchange_job_chunks", request.WorkspaceID).
-			Projections(query.Project(query.CountAll())).Where(query.Equal("job_id", job.ID)).Build()
+			Projections(query.Project(query.CountAll())).Where(query.Equal("job_id", job.JobID)).Build()
 		if err != nil {
 			return nil, err
 		}
@@ -259,7 +262,7 @@ func (s *Store) PrepareSubjectErasure(ctx context.Context, request sdk.SubjectEr
 				return nil, readErr
 			}
 			if !found || artifact.Owner != sharedartifact.OwnerDataExchange || artifact.Kind != "output" {
-				return nil, fmt.Errorf("Data Exchange job %s references an invalid shared artifact", job.ID)
+				return nil, fmt.Errorf("Data Exchange job %s references an invalid shared artifact", job.JobID)
 			}
 		}
 		cancel := query.NewWorkspaceUpdateBuilder(s.renderer, "_data_exchange_jobs", request.WorkspaceID).
@@ -314,7 +317,7 @@ func (s *Store) ErasePreparedSubject(ctx context.Context, request sdk.SubjectEra
 	}
 	chunks, artifacts := 0, 0
 	for _, job := range plan.Jobs {
-		deletion := query.NewWorkspaceDeleteBuilder(s.renderer, "_data_exchange_job_chunks", request.WorkspaceID).Where(query.Equal("job_id", job.ID))
+		deletion := query.NewWorkspaceDeleteBuilder(s.renderer, "_data_exchange_job_chunks", request.WorkspaceID).Where(query.Equal("job_id", job.JobID))
 		if _, err = execute(ctx, tx, deletion); err != nil {
 			return nil, err
 		}
@@ -325,22 +328,22 @@ func (s *Store) ErasePreparedSubject(ctx context.Context, request sdk.SubjectEra
 				return nil, readErr
 			}
 			if !found || artifact.Owner != sharedartifact.OwnerDataExchange || artifact.Kind != "output" {
-				return nil, fmt.Errorf("Data Exchange job %s shared artifact changed after preparation", job.ID)
+				return nil, fmt.Errorf("Data Exchange job %s shared artifact changed after preparation", job.JobID)
 			}
 			if artifact.Status != sharedartifact.StatusDeleted {
-				changed, transitionErr := s.artifacts.Transition(sharedContext, request.WorkspaceID, artifact.ID, artifact.Status, sharedartifact.StatusDeleted, artifact.ScanStatus, time.Now().UTC())
+				changed, transitionErr := s.artifacts.Transition(sharedContext, request.WorkspaceID, artifact.ArtifactID, artifact.Status, sharedartifact.StatusDeleted, artifact.ScanStatus, time.Now().UTC())
 				if transitionErr != nil {
 					return nil, transitionErr
 				}
 				if !changed {
-					return nil, fmt.Errorf("Data Exchange job %s shared artifact changed during erasure", job.ID)
+					return nil, fmt.Errorf("Data Exchange job %s shared artifact changed during erasure", job.JobID)
 				}
 			}
 			artifacts++
 		}
 		redact := query.NewWorkspaceUpdateBuilder(s.renderer, "_data_exchange_jobs", request.WorkspaceID).
 			Set("status", "cancelled").Set("error_code", "subject_erased").Set("request_payload", []byte{}).
-			Set("idempotency_key", "erased:"+fingerprint([]byte(job.ID))).Set("request_sha256", "").
+			Set("idempotency_key", "erased:"+fingerprint([]byte(job.JobID))).Set("request_sha256", "").
 			Set("source_sha256", "").Set("source_bytes", 0).Set("source_chunks", 0).Set("result_chunks", 0).
 			Set("checkpoint_value", 0).Set("checkpoint_cursor", "").Set("total_value", 0).
 			Set("artifact_id", "").Set("reference_id", "").Set("role_key", "").
