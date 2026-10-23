@@ -19,6 +19,7 @@ import (
 	"github.com/domainry/domainry-foundation/apperror"
 	"github.com/domainry/domainry-foundation/httpresponse"
 	"github.com/domainry/domainry-foundation/modulehttp"
+	"github.com/domainry/domainry-foundation/requestcontext"
 	identitysdk "github.com/domainry/domainry-identity-sdk"
 )
 
@@ -103,7 +104,7 @@ func (s *adapter) listJobs(response http.ResponseWriter, request *http.Request) 
 		limit = parsed
 	}
 	listRequest := dataexchange.JobListRequest{
-		Scope:    dataexchange.Scope{WorkspaceID: strings.TrimSpace(principal.WorkspaceID), ActorID: strings.TrimSpace(principal.UserID), RoleKey: strings.TrimSpace(principal.RoleKey), RequestID: strings.TrimSpace(request.Header.Get("X-Request-ID"))},
+		Scope:    dataexchange.Scope{WorkspaceID: strings.TrimSpace(principal.WorkspaceID), ActorID: strings.TrimSpace(principal.UserID), RoleKey: strings.TrimSpace(principal.RoleKey), RequestID: requestcontext.RequestID(request.Context())},
 		Provider: strings.TrimSpace(request.URL.Query().Get("provider")), Operation: strings.TrimSpace(request.URL.Query().Get("operation")), Status: strings.TrimSpace(request.URL.Query().Get("status")), Limit: limit,
 	}
 	if err := listRequest.Validate(); err != nil {
@@ -298,7 +299,7 @@ func httpJobRequest(response http.ResponseWriter, request *http.Request, permiss
 	}
 	jobRequest := dataexchange.JobRequest{
 		Scope: dataexchange.Scope{
-			WorkspaceID: strings.TrimSpace(principal.WorkspaceID), ActorID: strings.TrimSpace(principal.UserID), RoleKey: strings.TrimSpace(principal.RoleKey), RequestID: strings.TrimSpace(request.Header.Get("X-Request-ID")),
+			WorkspaceID: strings.TrimSpace(principal.WorkspaceID), ActorID: strings.TrimSpace(principal.UserID), RoleKey: strings.TrimSpace(principal.RoleKey), RequestID: requestcontext.RequestID(request.Context()),
 		},
 		JobID: strings.TrimSpace(request.PathValue("jobID")), Provider: strings.TrimSpace(request.URL.Query().Get("provider")), Operation: strings.TrimSpace(request.URL.Query().Get("operation")),
 	}
