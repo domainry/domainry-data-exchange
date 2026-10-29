@@ -156,15 +156,29 @@ func exactPermissionAction(action actioncontract.ActionDefinition) (actioncontra
 		return actioncontract.ActionDefinition{}, fmt.Errorf("Data Exchange Action %q cannot define an exact Permission", action.Key)
 	}
 	if action.Permission == nil {
+		operationKey := action.Key[separator+1:]
 		action.Permission = &actioncontract.PermissionDefinition{
-			Key: action.Key, Owner: action.Owner, ResourceKey: action.Key[:separator], OperationKey: action.Key[separator+1:],
-			Label: action.Label, Description: action.OperationLabel, Category: action.CapabilityLabel, LifecycleStatus: actioncontract.LifecycleActive,
+			Key: action.Key, Owner: action.Owner, ModuleKey: "data_exchange", GroupKey: "data_exchange.jobs",
+			ResourceKey: action.Key[:separator], OperationKey: operationKey,
+			Label: action.Label, Description: action.OperationLabel, Category: action.CapabilityLabel,
+			GrantMode: actioncontract.PermissionGrantInternal, ScopeKind: actioncontract.PermissionScopeNone,
+			DefaultLocale: "en", I18n: dataExchangePermissionText(operationKey, action.Label),
+			LifecycleStatus: actioncontract.LifecycleActive,
 		}
 	}
 	if action.Permission.Key != action.Key {
 		return actioncontract.ActionDefinition{}, fmt.Errorf("Data Exchange Action %q must use its same-key Permission", action.Key)
 	}
 	return actioncontract.NormalizeDefinition(action)
+}
+
+func dataExchangePermissionText(operationKey, englishLabel string) actioncontract.PermissionLocalizedText {
+	operationEnglish := map[string]string{"list": "List", "get": "View details", "cancel": "Cancel", "download": "Download result"}[operationKey]
+	operationChinese := map[string]string{"list": "查看列表", "get": "查看详情", "cancel": "取消", "download": "下载结果"}[operationKey]
+	return actioncontract.PermissionLocalizedText{
+		"en":    {ModuleLabel: "Data exchange", GroupLabel: "Exchange jobs", ResourceLabel: "Data exchange jobs", OperationLabel: operationEnglish, Label: englishLabel, Description: "Provides access to Data exchange jobs for the “" + operationEnglish + "” operation."},
+		"zh-CN": {ModuleLabel: "数据交换", GroupLabel: "交换任务", ResourceLabel: "数据交换任务", OperationLabel: operationChinese, Label: "数据交换任务 · " + operationChinese, Description: "允许对数据交换任务执行“" + operationChinese + "”操作。"},
+	}
 }
 
 // CapabilityRoutes returns the exact SDK-derived route manifest used by the
